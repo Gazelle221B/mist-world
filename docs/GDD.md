@@ -73,7 +73,7 @@ mistlib は以下の API を提供する。`init` / `joinRoom` / `leaveRoom` で
 
 Ed25519 は Web Crypto API 経由でネイティブ利用する。Chrome 137（2025 年 5 月〜）、Firefox 129（2024 年 8 月〜）、Safari 17 で対応しており、2026 年 3 月現在のブラウザカバレッジは約 79 %。非対応ブラウザ向けには `@yoursunny/webcrypto-ed25519` ポニーフィル（内部で `@noble/ed25519` を使用）、または `ed25519-dalek` の WASM ビルドをフォールバックとする。
 
-各ピアは初回接続時にキーペアを生成し、公開鍵をピア ID として使用する。全 CRDT 操作には Ed25519 署名が付与され、受信側で検証される。署名不正の操作はトラストスコアのペナルティ対象となる。
+各ピアは初回接続時にキーペアを生成し、公開鍵のハッシュをピア ID の導出元とし、WebRTC 接続直後のハンドシェイク RPC で公開鍵を交換する。全 CRDT 操作には Ed25519 署名が付与され、受信側で検証される。署名不正の操作はトラストスコアのペナルティ対象となる。秘密鍵は IndexedDB に `non-extractable` で保存し、XSS 等による生鍵の直接流出リスクを軽減する（署名操作の悪用リスクは残る）。
 
 **トラストスコア UX**: スコアは 0.0〜1.0 の浮動小数点で管理し、4 段階のラベルと色で表示する。Trusted（0.8〜1.0、緑）、Normal（0.5〜0.79、黄）、Caution（0.2〜0.49、橙）、Blocked（0.0〜0.19、赤）。ブロック・解除はアバター右クリックメニューから行う。スコアは `trust.toml` としてローカル保存される。
 
@@ -109,17 +109,17 @@ Vite 6 をバンドラとして使用する。Rust/WASM のビルドは `wasm-pa
 
 `.mistworld` はワールドのポータブルなエクスポート形式である。JSON エンベロープに以下のフィールドを持つ。
 
-`version`（string）: フォーマットバージョン（"1.0.0"）。`seed`（string）: ワールド生成シード（u64 の文字列表現）。`wasmHash`（string）: WFC WASM モジュールの SHA-256 ハッシュ（再現性検証用）。`engine`（string）: 使用エンジン識別子（"mist-wfc@0.1.0"）。`buildings`（string）: Loro スナップショットの Base64 エンコード。`metadata`（object）: ワールド名・作成日時・作者公開鍵。`trustPolicy`（object）: デフォルトトラストスコア・ペナルティ係数。`signature`（string）: エンベロープ全体の Ed25519 署名（Base64）。
+`version`（string）: フォーマットバージョン（"1.0.0"）。`seed`（string）: ワールド生成シード（u64 の文字列表現）。`wasmHash`（string）: WFC WASM モジュールの SHA-256 ハッシュ（再現性検証用）。`engine`（string）: 使用エンジン識別子（"mist-wfc@1.0.0"）。`snapshot`（string）: Loro スナップショットの Base64 エンコード。`metadata`（object）: ワールド名・作成日時・作成者公開鍵。`trustPolicy`（object）: 詳細なペナルティ係数と最低スコア。`signature`（string）: エンベロープ全体の Ed25519 署名（Base64）。
 
-インポート時には `wasmHash` を検証し、一致しない場合は警告を表示してユーザに続行可否を確認する。`buildings` は Loro のインクリメンタルインポートで読み込まれる。
+インポート時には `wasmHash` を検証し、一致しない場合は警告を表示してユーザに続行可否を確認する。復元時は `CrdtStore.importSnapshot(snapshot)` を用いて CRDT の状態が一括ロードされる。
 
 ---
 
 ## 5. 招待リンク
 
-形式: `https://mist.world/join?room={roomId}&token={signedToken}&exp={timestamp}`
+形式: `https://mist.world/join?room={roomId}&token={signedToken}`
 
-`roomId` は UUID v4。`signedToken` は招待者の Ed25519 秘密鍵で署名されたペイロード（roomId + exp）。`exp` は UNIX タイムスタンプで、デフォルト有効期限は 24 時間。期限切れトークンでのアクセスは拒否される。招待の取り消しは CRDT 上のメタデータ操作として実装し、全ピアに伝播する。
+`roomId` は UUID v4。`token` は招待者の Ed25519 秘密鍵で署名されたペイロード（roomId + exp + tokenId）。`exp` は UNIX タイムスタンプで、デフォルト有効期限は 24 時間。参加者は WebRTC 接続確立直後にトークンを送信し、既存ピアが署名、期限、および CRDT 上の失効済み `tokenId` リストを検証してアクセスを判定する。招待の取り消しは対象の `tokenId` を CRDT メタデータの失効リストに追加することで全ピアに伝播する。
 
 ---
 

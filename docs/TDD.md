@@ -166,9 +166,9 @@ interface RenderConfig {
 
 乱数は `ChaCha8Rng::seed_from_u64(seed)` で初期化する。内部のエントロピーヒープは `BTreeMap<u32, Vec<u16>>` で管理し、キーはエントロピー値（整数化した重み合計の逆数）、値は候補セル ID のリスト。浮動小数点演算は一切使用しない。重みは u32 整数として定義し、正規化が必要な箇所では分数演算（分子/分母を個別に u64 で保持）を使用する。
 
-タイルセットは JSON で定義し、`serde_json` でデシリアライズする。各タイルは `id: u16`、`weight: u32`、`adjacency: HashMap<Direction, Vec<u16>>`（6 方向）を持つ。Direction は `NE, E, SE, SW, W, NW` の 6 値 enum。
+タイルセットは JSON で定義し、`serde_json` でデシリアライズする。各タイルは `id: u16`、`weight: u32`、`adjacency: BTreeMap<Direction, Vec<u16>>`（6 方向）を持つ。Direction は `NE, E, SE, SW, W, NW` の 6 値 enum。
 
-崩壊不能（contradiction）が発生した場合、そのセルを特殊タイル `VOID`（id = 0）で埋め、処理を続行する。全セル崩壊後に VOID セルが存在すれば、近傍の最頻タイルで置換するフォールバック処理を行う。
+崩壊不能（contradiction）が発生した場合、そのセルを特殊タイル `VOID`（id = 0）で埋め、処理を続行する。全セル崩壊後に VOID セルが存在すれば、周囲の有効な制約を再検証し、決定論的フォールバック（例: 最も制約の緩いタイルの強制配置、またはエラーシードとしてリジェクト）を適用する。
 
 ### 3.2 WfcBridge（TypeScript 側）
 
@@ -228,7 +228,7 @@ class ThinInstancePool {
 
 Thin Instance は Babylon.js の `mesh.thinInstanceSetBuffer("matrix", buffer, 16)` API を使用する。KayKit の各タイル種別ごとに 1 つのソースメッシュを用意し、そのタイルが配置されている全ヘクスセルの world 変換行列を 1 つの `Float32Array` にパックする。`buildFromGrid` は WFC 結果から全行列バッファを構築し、一括で `thinInstanceSetBuffer` を呼ぶ。`updateTile` は建築操作時に単一セルの行列を更新する（`thinInstanceSetMatrixAt` で差分更新）。
 
-`loadAssets` は `SceneLoader.ImportMeshAsync` で KayKit glTF を読み込み、タイル ID ごとにソースメッシュを登録する。
+`loadAssets` は `SceneLoader.ImportMeshAsync` で KayKit glTF を読み込み、タイル ID ごとにソースメッシュを登録する。このプールは**地形タイル専用**であり、建築物の描画（`BuildingSync`）には使用しない（建築物は個別の `MistSyncEntity` を用いる）。
 
 ---
 
@@ -294,14 +294,15 @@ class PeerManager {
   getPeerCount(): number;
 
   // 内部イベントハンドリング
-  private handleJoin(peerId: string): void;
+  private handleJoin(peerId: string): void; // 接続確立時は peerId のみ。ハンドシェイク待ち。
+  private handleHandshake(peerId: string, publicKeyBase64: string, joinToken: string): void;
   private handleLeave(peerId: string): void;
   private handleMessage(peerId: string, data: Uint8Array): void;
 }
 
 interface PeerState {
   peerId: string;
-  publicKey: CryptoKey | null;
+  publicKey: CryptoKey | null; // Handshake 完了後に設定
   trustScore: number;
   lastSeen: number;
   rtt: number;
@@ -344,12 +345,10 @@ class TopologyManager {
 
 ```typescript
 interface RpcEnvelope {
-  type: "rpc";
+  callId: number;
   method: string;
-  args: unknown[];
-  callId: number; // monotonic counter
-  senderId: string; // peer ID
-  signature: Uint8Array; // Ed25519 signature of method + args + callId
+  payload: Uint8Array; // MessagePack encoded arguments
+  signature: string; // Base64 encoded Ed25519 signature
 }
 ```
 
@@ -365,6 +364,7 @@ type RpcHandler = (
 
 class RpcRouter {
   private handlers: Map<string, RpcHandler>;
+  private processedCallIds: Map<string, Set<number>>; // peerId -> seen callIds for replay protection
 
   register(method: string, handler: RpcHandler): void;
   unregister(method: string): void;
@@ -379,9 +379,11 @@ class RpcRouter {
 }
 ```
 
-`dispatch` 内でまず MessagePack デコード → `RpcEnvelope` 型チェック → Ed25519 署名検証 → `handlers.get(method)` でハンドラ呼び出しの順序で処理する。署名検証失敗時は `TrustScorer` に −0.5 ペナルティを通知し、メッセージを破棄する。
+`dispatch` 内でまず MessagePack デコード → `RpcEnvelope` 型チェック → 送信元の `processedCallIds` に `callId` が存在しないか（リプレイ保護）を確認する。次に Ed25519 署名検証を行う。通常は登録済みのピア公開鍵を使用するが、`handshake` メソッドの場合はペイロード内の `publicKeyBase64` を検証キーとして使用する。署名検証に成功して初めて、その公開鍵の正当な所有者と認定し、`handlers.get(method)` でハンドラ呼び出しの順序で処理する。リプレイ保護のログは直近 1000 件を保持する。署名検証失敗時やリプレイ検知時は `TrustScorer` に −0.5 ペナルティを通知し、メッセージを破棄する。
 
 ### 5.3 登録される RPC メソッド一覧
+
+`handshake` は WebRTC 接続直後の本人確認と参加権限検証を処理する。引数は `(publicKeyBase64: string, joinToken: string)`。ハンドラは `PeerManager.handleHandshake` を呼び、まず受け取った公開鍵の SHA-256 ハッシュ先頭 8 バイトが WebRTC の `peerId` と一致するか検証する。不一致の場合は詐称とみなし即時切断する（前段の署名検証により、この公開鍵の秘密鍵を実際に所有していることは証明済みである）。一致後、トークンの署名と失効リストを検証して参加権限を満たすか確認する。
 
 `spawn` は建築物スポーンを処理する。引数は `(assetId: string, q: number, r: number, rotation: number)`。ハンドラは `BuildingSync.addBuilding` を呼ぶ。
 
@@ -447,7 +449,7 @@ class CrdtStore {
 
 ### 6.2 LoroDoc ピア ID の管理
 
-`LoroDoc.setPeerId` には Ed25519 公開鍵のハッシュから導出した u64 を使用する。公開鍵（32 バイト）の先頭 8 バイトを `BigUint64Array` として読み取り、`doc.setPeerId(peerId)` に渡す。これにより Loro のピア ID と暗号学的アイデンティティが紐づく。
+`LoroDoc.setPeerId` にはローカルキーペアの Ed25519 公開鍵の SHA-256 ハッシュから導出した u64 を使用する。パブリックキー（32 バイト）をハッシュ化し、その先頭 8 バイトを `BigUint64Array` として読み取り、`doc.setPeerId(peerId)` に渡す。これにより Loro のピア ID と暗号学的アイデンティティが紐づく。
 
 ### 6.3 BuildingSync — 建築物同期
 
@@ -477,7 +479,7 @@ class BuildingSync {
 
 `addBuilding` は内部で `store.buildings` リストに新しい `LoroMap` を push する。LoroMap のキーは `id`, `assetId`, `q`, `r`, `rotation`, `ownerId`, `createdAt`。`removeBuilding` は該当する LoroMap を検索し、リストから削除する（Loro の List.delete）。
 
-`onChange` は `store.doc.subscribe` でイベントを受け取り、`buildings` コンテナの差分を解析して、新規追加と削除をコールバックに通知する。このコールバック内で `ThinInstancePool.updateTile` を呼び、画面に即時反映する。
+`onChange` は `store.doc.subscribe` でイベントを受け取り、`buildings` コンテナの差分を解析して、新規追加と削除をコールバックに通知する。このコールバック内で `MistSyncEntity` のスポーン/デスポーン処理を呼び、画面に即時反映する（`ThinInstancePool` には干渉しない）。
 
 ### 6.4 ChatSync — チャットログ同期
 
@@ -672,16 +674,20 @@ interface MistworldFile {
   version: "1.0.0";
   seed: string; // u64 decimal string
   wasmHash: string; // SHA-256 hex
-  engine: string; // "mist-wfc@0.1.0"
-  buildings: string; // Loro snapshot, Base64
+  engine: string; // "mist-wfc@1.0.0"
+  snapshot: string; // Loro snapshot, Base64
   metadata: {
     name: string;
     createdAt: number;
-    authorPublicKey: string; // Base64
+    creatorPubKey: string; // Base64
   };
   trustPolicy: {
-    defaultScore: number;
-    penalties: Record<string, number>;
+    signatureForgery: number;
+    wfcViolation: number;
+    physicsCheat: number;
+    spam: number;
+    normalOp: number;
+    minScore: number;
   };
   signature: string; // Ed25519 signature, Base64
 }
@@ -786,24 +792,15 @@ class InviteGenerator {
 }
 ```
 
-ペイロードは `{ roomId, exp: Date.now()/1000 + expiresIn }` を JSON 文字列化し、Ed25519 で署名する。署名とペイロードを Base64url エンコードして `token` パラメータに格納する。URL は `https://mist.world/join?room={roomId}&token={token}&exp={exp}`。
+ペイロードは `{ roomId, exp, tokenId }`（`tokenId` は UUID v4）を JSON 文字列化し、作成者の Ed25519 秘密鍵で署名する。署名とペイロードを Base64url エンコードして `token` パラメータに格納する。URL は `https://mist.world/join?room={roomId}&token={token}`。参加者は WebRTC 接続確立直後の `handshake` RPC でこのトークンを既存ピアに送信する。既存ピアはトークンの署名と `exp` を検証し、CRDT 上のメタデータ（失効済み `tokenId` リスト）と照合して、失効済みであれば接続を即時切断（拒否）する。
 
 ### 12.2 検証
 
-```typescript
-class InviteVerifier {
-  async verify(
-    url: string,
-    authorPublicKey: CryptoKey,
-  ): Promise<{ valid: boolean; expired: boolean; roomId: string }>;
-}
-```
-
-クエリパラメータから `token` と `exp` を取得し、`exp` が現在時刻より過去であれば `expired: true` を返す。署名検証は `SignatureVerifier.verify` で行う。検証成功後、`MistBridge.joinRoom()` を呼び出す。
+参加するクライアントは招待 URL から `token` を抽出し、そのまま WebRTC 接続直後の `handshake` RPC で既存ピアに送信する。クライアント側での参加前の事前検証 API は提供せず、権限の最終判定はすべて既存ピアが（`token` の署名、`exp`、および CRDT 上の失効リストに合致しないかの検証を通じて）行う。検証に失敗した場合、既存ピアは接続を即時切断（拒否）する。
 
 ### 12.3 取り消し
 
-招待取り消しは `MetadataSync` 経由で CRDT 上の `revokedTokens`（LoroList）にトークンハッシュを追加することで実現する。新規参加者のトークンが `revokedTokens` に含まれていれば接続を拒否する。
+招待取り消しは `MetadataSync` 経由で CRDT 上の `revokedTokens`（LoroList）に対象の `tokenId` を追加することで実現する。新規参加者のトークンが `revokedTokens` に含まれていれば既存ピアは接続を拒否する。
 
 ---
 
@@ -861,7 +858,7 @@ Babylon.js の `engine.getFps()` と `scene.getActiveMeshes().length` を 60 秒
 
 ### 16.1 入力バリデーション
 
-全 RPC メッセージは以下の順序でバリデーションする。MessagePack デコード成功、`type` フィールドが `'rpc'`、`method` が登録済み、引数の型と数が期待通り、`signature` が有効、送信元ピアがブロック済みでない。いずれかが失敗した場合、メッセージを破棄しトラストペナルティを適用する。
+全 RPC メッセージは以下の順序でバリデーションする。外枠の MessagePack デコードが行え `RpcEnvelope` の構造を持つか、送信元ピアがブロック済みでないか、`method` が登録済みか、`signature` が有効かを確認する（`handshake` 等のブートストラップメソッド時はペイロード内の公開鍵を検証キーとして使用する）。その後、`payload` フィールドをMessagePackデコードし、引数の型と数が対象メソッドのスキーマと一致するか検証する。いずれかが失敗した場合、メッセージを破棄しトラストペナルティを適用する。
 
 ### 16.2 WFC 検証
 
@@ -873,7 +870,7 @@ Babylon.js の `engine.getFps()` と `scene.getActiveMeshes().length` を 60 秒
 
 ### 16.4 鍵管理
 
-Ed25519 秘密鍵は OPFS に保存し、`crypto.subtle.exportKey('pkcs8', privateKey)` で PKCS8 形式にシリアライズする。鍵は non-extractable として生成するオプションを検討したが、OPFS 永続化のために extractable とする必要がある。代わりに OPFS 自体のオリジン分離に依存し、追加の暗号化層は設けない（ブラウザの Same-Origin ポリシーで保護される）。
+Ed25519 秘密鍵は `non-extractable` として生成し、Web Crypto API の仕様上 Javascript から平文を読み取れないようにする。永続化はブラウザの `IndexedDB`（CryptoKey オブジェクトの生保存サポート）に行い、`OPFS` には公開鍵情報のみを配置する。これにより、XSS 等により秘密鍵データそのものが直接抜き取られるリスクを軽減する（ただし、XSS 成立時は `CryptoKey` への参照を通じた署名操作自体は悪用され得る弱点は残る）。デバイスを跨いだアカウント移行は `.mistworld` エクスポート/インポート時の移譲処理が必要となる。
 
 ---
 

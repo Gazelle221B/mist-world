@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "mist-wfc",
+    "mist-crypto"
+]
+resolver = "2"
