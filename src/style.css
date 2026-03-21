@@ -115,6 +115,11 @@ body::before {
   font-size: 0.85rem;
 }
 
+.pill--dim {
+  opacity: 0.72;
+  font-size: 0.78rem;
+}
+
 .status-line {
   padding: 0 22px 10px;
 }
