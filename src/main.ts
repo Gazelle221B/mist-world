@@ -12,13 +12,17 @@ import {
   WebGPUEngine,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
+import { generatePreview } from "./world/wfc-bridge.ts";
+import { renderIsland } from "./world/island-renderer.ts";
 
 declare global {
   interface Window {
     render_game_to_text?: () => string;
-    advanceTime?: (ms: number) => void;
   }
 }
+
+const DEFAULT_SEED_HI = 0xdeadbeef;
+const DEFAULT_SEED_LO = 0xcafe0001;
 
 type RendererKind = "webgpu" | "webgl2";
 
@@ -28,6 +32,10 @@ interface RuntimeState {
   meshCount: number;
   fps: number;
   cameraRadius: number;
+  seedHex: string;
+  generator: "wasm" | "ts-fallback";
+  tileCount: number;
+  tiles: Array<{ q: number; r: number; terrain: number }>;
 }
 
 function mustQuerySelector<ElementType extends Element>(selector: string): ElementType {
@@ -45,7 +53,7 @@ app.innerHTML = `
     <header class="masthead">
       <p class="eyebrow">Mist World / Sprint 0</p>
       <h1>Babylon + WASM bootstrap</h1>
-      <p class="summary">WebGPU-first scene startup with WebGL2 fallback, ready for Rust/WASM modules.</p>
+      <p class="summary">Seeded island preview — hex grid vertical slice.</p>
     </header>
     <div class="viewport">
       <canvas id="render-canvas" aria-label="Mist World viewport"></canvas>
@@ -71,6 +79,10 @@ const state: RuntimeState = {
   meshCount: 0,
   fps: 0,
   cameraRadius: 0,
+  seedHex: "",
+  generator: "ts-fallback",
+  tileCount: 0,
+  tiles: [],
 };
 
 async function createEngine(target: HTMLCanvasElement) {
@@ -106,18 +118,16 @@ function updateHud() {
 
 function renderGameToText() {
   return JSON.stringify({
-    mode: "bootstrap",
+    mode: "preview",
     renderer: state.renderer,
     sceneReady: state.sceneReady,
     meshCount: state.meshCount,
     fps: Number(state.fps.toFixed(1)),
     cameraRadius: Number(state.cameraRadius.toFixed(2)),
-    coordinateSystem: {
-      origin: "world center",
-      x: "east",
-      y: "up",
-      z: "south",
-    },
+    seedHex: state.seedHex,
+    generator: state.generator,
+    tileCount: state.tileCount,
+    tiles: state.tiles,
   });
 }
 
@@ -142,30 +152,6 @@ async function bootstrap() {
   const light = new HemisphericLight("sun", new Vector3(0.15, 1, 0.1), scene);
   light.intensity = 1.1;
 
-  const islandBase = MeshBuilder.CreateCylinder(
-    "island-base",
-    {
-      diameter: 5.4,
-      height: 0.8,
-      tessellation: 6,
-    },
-    scene,
-  );
-  islandBase.position.y = -0.4;
-  islandBase.rotation.y = Math.PI / 6;
-
-  const islandCap = MeshBuilder.CreateCylinder(
-    "island-cap",
-    {
-      diameter: 5,
-      height: 0.32,
-      tessellation: 6,
-    },
-    scene,
-  );
-  islandCap.position.y = 0.16;
-  islandCap.rotation.y = Math.PI / 6;
-
   const sea = MeshBuilder.CreateGround(
     "sea",
     {
@@ -177,30 +163,26 @@ async function bootstrap() {
   );
   sea.position.y = -0.82;
 
-  const terrainMaterial = new StandardMaterial("terrain-material", scene);
-  terrainMaterial.diffuseColor.set(0.56, 0.68, 0.46);
-  terrainMaterial.specularColor.set(0.07, 0.08, 0.06);
-  islandBase.material = terrainMaterial;
-  islandCap.material = terrainMaterial;
-
   const seaMaterial = new StandardMaterial("sea-material", scene);
   seaMaterial.diffuseColor.set(0.39, 0.62, 0.68);
   seaMaterial.specularColor.set(0.18, 0.25, 0.28);
   seaMaterial.alpha = 0.96;
   sea.material = seaMaterial;
 
+  const preview = generatePreview(DEFAULT_SEED_HI, DEFAULT_SEED_LO);
+  renderIsland(scene, preview.tiles);
+
   state.renderer = renderer;
   state.sceneReady = true;
+  state.seedHex = preview.seedHex;
+  state.generator = preview.generator;
+  state.tileCount = preview.tileCount;
+  state.tiles = preview.tiles;
+
   statusLine.textContent =
-    "Engine ready. Drag to orbit, scroll to zoom, and press F to toggle fullscreen.";
+    `Preview: seed ${preview.seedHex} (${preview.generator}) — ${preview.tileCount} tiles. Drag to orbit, scroll to zoom.`;
 
-  let lastFrame = performance.now();
-  let simulatedSpin = 0;
-
-  const step = (deltaMs: number) => {
-    simulatedSpin += deltaMs * 0.00028;
-    islandCap.rotation.y = Math.PI / 6 + simulatedSpin;
-    islandBase.rotation.y = Math.PI / 6 + simulatedSpin * 0.5;
+  const step = () => {
     state.meshCount = scene.meshes.length;
     state.fps = engine.getFps();
     state.cameraRadius = camera.radius;
@@ -208,16 +190,10 @@ async function bootstrap() {
   };
 
   engine.runRenderLoop(() => {
-    const now = performance.now();
-    step(now - lastFrame);
-    lastFrame = now;
+    step();
     scene.render();
   });
 
-  window.advanceTime = (ms: number) => {
-    step(ms);
-    scene.render();
-  };
   window.render_game_to_text = renderGameToText;
 
   window.addEventListener("keydown", async (event) => {
