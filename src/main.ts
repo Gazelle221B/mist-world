@@ -14,15 +14,13 @@ import {
 import "@babylonjs/loaders/glTF";
 import { generatePreview } from "./world/wfc-bridge.ts";
 import { renderIsland } from "./world/island-renderer.ts";
+import { seedFromHash } from "./world/seed.ts";
 
 declare global {
   interface Window {
     render_game_to_text?: () => string;
   }
 }
-
-const DEFAULT_SEED_HI = 0xdeadbeef;
-const DEFAULT_SEED_LO = 0xcafe0001;
 
 type RendererKind = "webgpu" | "webgl2";
 
@@ -169,7 +167,8 @@ async function bootstrap() {
   seaMaterial.alpha = 0.96;
   sea.material = seaMaterial;
 
-  const preview = generatePreview(DEFAULT_SEED_HI, DEFAULT_SEED_LO);
+  const seed = seedFromHash();
+  const preview = generatePreview(seed.hi, seed.lo);
   renderIsland(scene, preview.tiles);
 
   state.renderer = renderer;
