@@ -12,7 +12,7 @@ import {
   WebGPUEngine,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
-import { generatePreview } from "./world/wfc-bridge.ts";
+import { generatePreview, initBridge } from "./world/wfc-bridge.ts";
 import { renderIsland } from "./world/island-renderer.ts";
 import { seedFromHash } from "./world/seed.ts";
 
@@ -170,6 +170,9 @@ async function bootstrap() {
   seaMaterial.specularColor.set(0.18, 0.25, 0.28);
   seaMaterial.alpha = 0.96;
   sea.material = seaMaterial;
+
+  const providerKind = await initBridge();
+  console.log(`[mist-world] WFC provider: ${providerKind}`);
 
   const seed = seedFromHash();
   const preview = generatePreview(seed.hi, seed.lo);
