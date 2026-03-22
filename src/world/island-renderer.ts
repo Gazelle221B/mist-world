@@ -2,12 +2,12 @@ import {
   Color3,
   Matrix,
   type Mesh,
-  MeshBuilder,
   type Scene,
   StandardMaterial,
 } from "@babylonjs/core";
 import type { TileData } from "./wfc-bridge.ts";
 import { axialToWorld } from "./hex-grid.ts";
+import { loadMeshDescriptor } from "./asset-loader.ts";
 import {
   lookupTile,
   type MeshDescriptor,
@@ -23,29 +23,10 @@ interface TileEntry {
   desc: TileDescriptor;
 }
 
-function createSourceMesh(
-  md: MeshDescriptor,
+export async function renderIsland(
   scene: Scene,
-  material: StandardMaterial,
-): Mesh {
-  switch (md.kind) {
-    case "primitive": {
-      const mesh = MeshBuilder.CreateCylinder(
-        `src-${md.key}`,
-        { tessellation: md.tessellation, diameter: md.diameter, height: md.height },
-        scene,
-      );
-      mesh.material = material;
-      mesh.rotation.y = md.rotationY;
-      mesh.hasVertexAlpha = true;
-      return mesh;
-    }
-    case "gltf":
-      throw new Error("glTF mesh descriptors are not wired yet");
-  }
-}
-
-export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {
+  tiles: TileData[],
+): Promise<IslandHandle> {
   const material = new StandardMaterial("hex-terrain", scene);
   material.diffuseColor = new Color3(1, 1, 1);
   material.specularColor = new Color3(0.1, 0.1, 0.1);
@@ -64,11 +45,12 @@ export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {
     group.entries.push({ tile, desc });
   }
 
-  // Build source meshes and thin instances per group
+  // Load source meshes and build thin instances per group
   const meshes: Mesh[] = [];
 
   for (const [, group] of groups) {
-    const source = createSourceMesh(group.md, scene, material);
+    const source = await loadMeshDescriptor(scene, material, group.md);
+    source.setEnabled(true);
     const colorData = new Float32Array(group.entries.length * 4);
 
     for (let i = 0; i < group.entries.length; i++) {

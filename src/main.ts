@@ -193,7 +193,7 @@ async function bootstrap() {
 
   let currentIsland: IslandHandle | null = null;
 
-  function rebuildPreview() {
+  async function rebuildPreview() {
     const seed = seedFromHash();
     const radius = radiusFromQuery();
     const preview = generateIsland(seed.hi, seed.lo, radius);
@@ -205,7 +205,7 @@ async function bootstrap() {
       currentIsland = null;
     }
 
-    currentIsland = renderIsland(scene, preview.tiles);
+    currentIsland = await renderIsland(scene, preview.tiles);
 
     state.seedHex = preview.seedHex;
     state.generator = preview.generator;
@@ -232,7 +232,7 @@ async function bootstrap() {
     }
   }
 
-  rebuildPreview();
+  await rebuildPreview();
 
   const step = () => {
     state.meshCount = scene.meshes.length;
