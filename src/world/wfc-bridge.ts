@@ -161,7 +161,7 @@ export async function initBridge(): Promise<GeneratorProviderKind> {
 }
 
 /** Default island radius (ring count). */
-const DEFAULT_RADIUS = 1;
+const DEFAULT_RADIUS = 2;
 
 /**
  * Generate an island using the active provider.
