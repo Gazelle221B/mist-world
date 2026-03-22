@@ -12,6 +12,14 @@ export function engine_version(): string;
 export function generate(seed_hi: number, seed_lo: number, radius: number): string;
 
 /**
+ * Generate a hex island with boundary constraints from neighbouring regions.
+ *
+ * `constraints_json` is a JSON array of `{ q, r, dir, edge_type }` objects
+ * specifying edge constraints from already-populated neighbours.
+ */
+export function generate_constrained(seed_hi: number, seed_lo: number, radius: number, constraints_json: string): string;
+
+/**
  * Legacy preview — kept for backwards compatibility.
  */
 export function generate_preview(seed_hi: number, seed_lo: number): string;
@@ -22,9 +30,12 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly engine_version: () => [number, number];
     readonly generate: (a: number, b: number, c: number) => [number, number];
+    readonly generate_constrained: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly generate_preview: (a: number, b: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
 }
 

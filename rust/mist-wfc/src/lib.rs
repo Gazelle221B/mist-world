@@ -9,7 +9,7 @@
 
 use rand_chacha::ChaCha8Rng;
 use rand_core::{RngCore, SeedableRng};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -160,6 +160,65 @@ fn edge_at(proto: &TilePrototype, dir: usize, rot: usize) -> u8 {
 }
 
 // ---------------------------------------------------------------------------
+// Boundary constraints (for seam-aware expansion)
+// ---------------------------------------------------------------------------
+
+/// A boundary constraint from an already-populated neighbouring region.
+/// Tells the WFC: "the tile at local (q, r), looking in direction `dir`,
+/// has an existing neighbour whose touching edge is `edge_type`."
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct BoundaryConstraint {
+    q: i32,
+    r: i32,
+    dir: usize,
+    edge_type: u8,
+}
+
+/// Pre-filter candidates on cells that have boundary constraints.
+/// Returns the number of cells whose candidate set was narrowed.
+fn apply_boundary_constraints(
+    constraints: &[BoundaryConstraint],
+    coord_to_idx: &BTreeMap<(i32, i32), usize>,
+    cells: &mut [Cell],
+) -> usize {
+    let mut fix_count: usize = 0;
+    for bc in constraints {
+        let Some(&idx) = coord_to_idx.get(&(bc.q, bc.r)) else {
+            continue;
+        };
+        let cell = &mut cells[idx];
+        if cell.collapsed {
+            continue;
+        }
+
+        let mut new_mask: u64 = 0;
+        let mut new_count: u32 = 0;
+
+        for cand in 0..TOTAL_CANDIDATES {
+            if cell.candidates & (1_u64 << cand) == 0 {
+                continue;
+            }
+            let (p_idx, rot) = decode(cand);
+            let my_edge = edge_at(&PROTOTYPES[p_idx], bc.dir, rot);
+            // The existing neighbour has edge `bc.edge_type` facing us;
+            // we need ADJ_WEIGHTS[bc.edge_type][my_edge] > 0.
+            if ADJ_WEIGHTS[bc.edge_type as usize][my_edge as usize] > 0 {
+                new_mask |= 1_u64 << cand;
+                new_count += 1;
+            }
+        }
+
+        if new_mask != cell.candidates {
+            cell.candidates = new_mask;
+            cell.count = new_count;
+            fix_count += 1;
+        }
+    }
+    fix_count
+}
+
+// ---------------------------------------------------------------------------
 // WFC core (prototype-based, integer entropy)
 // ---------------------------------------------------------------------------
 
@@ -178,6 +237,8 @@ struct Cell {
     proto_id: u8,
     /// Assigned rotation 0..5 (valid only when collapsed).
     rotation: u8,
+    /// Order in which this cell was collapsed (0-based).
+    collapse_order: u32,
 }
 
 impl Cell {
@@ -189,6 +250,7 @@ impl Cell {
             terrain: 0,
             proto_id: 0,
             rotation: 0,
+            collapse_order: 0,
         }
     }
 }
@@ -196,18 +258,16 @@ impl Cell {
 /// Adjacency list entry: (neighbour_cell_index, direction_from_self 0..5).
 type AdjList = Vec<Vec<(usize, usize)>>;
 
-/// Run WFC on a hex grid of given radius.
-/// Returns (terrain, prototype_id, rotation) per cell in hex_spiral order.
-fn wfc_collapse(coords: &[(i32, i32)], rng: &mut ChaCha8Rng) -> Vec<(u8, u8, u8)> {
-    let n = coords.len();
-
+/// Shared setup: build coordinate index and adjacency lists.
+fn wfc_setup(
+    coords: &[(i32, i32)],
+) -> (BTreeMap<(i32, i32), usize>, AdjList, Vec<Cell>) {
     let coord_to_idx: BTreeMap<(i32, i32), usize> = coords
         .iter()
         .enumerate()
         .map(|(i, &c)| (c, i))
         .collect();
 
-    // Precompute adjacency lists with direction info
     let adj: AdjList = coords
         .iter()
         .map(|&(q, r)| {
@@ -223,7 +283,13 @@ fn wfc_collapse(coords: &[(i32, i32)], rng: &mut ChaCha8Rng) -> Vec<(u8, u8, u8)
         })
         .collect();
 
-    let mut cells: Vec<Cell> = vec![Cell::new(); n];
+    let cells = vec![Cell::new(); coords.len()];
+    (coord_to_idx, adj, cells)
+}
+
+/// Main WFC collapse loop. Operates on pre-initialised cells.
+fn wfc_main_loop(cells: &mut [Cell], adj: &AdjList, rng: &mut ChaCha8Rng) {
+    let n = cells.len();
     let mut collapsed_count: usize = 0;
 
     while collapsed_count < n {
@@ -258,24 +324,26 @@ fn wfc_collapse(coords: &[(i32, i32)], rng: &mut ChaCha8Rng) -> Vec<(u8, u8, u8)
             cells[cell_idx].terrain = TERRAIN_VOID;
             cells[cell_idx].proto_id = 0;
             cells[cell_idx].rotation = 0;
+            cells[cell_idx].collapse_order = collapsed_count as u32;
             collapsed_count += 1;
             continue; // no propagation for VOID
         }
 
         // 3. Collapse: pick a candidate weighted by edge context.
-        match pick_candidate(&cells[cell_idx], &adj[cell_idx], &cells, rng) {
+        match pick_candidate(&cells[cell_idx], &adj[cell_idx], cells, rng) {
             Some((p_idx, rot)) => {
                 let proto = &PROTOTYPES[p_idx];
                 cells[cell_idx].collapsed = true;
                 cells[cell_idx].terrain = proto.terrain;
                 cells[cell_idx].proto_id = p_idx as u8;
                 cells[cell_idx].rotation = rot as u8;
+                cells[cell_idx].collapse_order = collapsed_count as u32;
                 cells[cell_idx].candidates = 1_u64 << encode(p_idx, rot);
                 cells[cell_idx].count = 1;
                 collapsed_count += 1;
 
                 // 4. Propagate constraints
-                propagate(cell_idx, &adj, &mut cells);
+                propagate(cell_idx, adj, cells);
             }
             None => {
                 // Contradiction during pick
@@ -283,15 +351,55 @@ fn wfc_collapse(coords: &[(i32, i32)], rng: &mut ChaCha8Rng) -> Vec<(u8, u8, u8)
                 cells[cell_idx].terrain = TERRAIN_VOID;
                 cells[cell_idx].proto_id = 0;
                 cells[cell_idx].rotation = 0;
+                cells[cell_idx].collapse_order = collapsed_count as u32;
                 collapsed_count += 1;
             }
         }
     }
+}
 
+/// Run unconstrained WFC on a hex grid.
+/// Returns (terrain, prototype_id, rotation, collapse_order) per cell.
+fn wfc_collapse(coords: &[(i32, i32)], rng: &mut ChaCha8Rng) -> Vec<(u8, u8, u8, u32)> {
+    let (_coord_to_idx, adj, mut cells) = wfc_setup(coords);
+    wfc_main_loop(&mut cells, &adj, rng);
     cells
         .iter()
-        .map(|c| (c.terrain, c.proto_id, c.rotation))
+        .map(|c| (c.terrain, c.proto_id, c.rotation, c.collapse_order))
         .collect()
+}
+
+/// Run WFC with boundary constraints from neighbouring regions.
+/// Returns ((terrain, proto_id, rotation, collapse_order) per cell, fix_count).
+fn wfc_collapse_constrained(
+    coords: &[(i32, i32)],
+    rng: &mut ChaCha8Rng,
+    constraints: &[BoundaryConstraint],
+) -> (Vec<(u8, u8, u8, u32)>, usize) {
+    let (coord_to_idx, adj, mut cells) = wfc_setup(coords);
+
+    // Apply boundary constraints before the main loop
+    let fix_count = apply_boundary_constraints(constraints, &coord_to_idx, &mut cells);
+
+    // Propagate from all constrained cells to cascade restrictions
+    // Use a BTreeSet to collect unique constrained cell indices for determinism
+    let mut constrained_indices: Vec<usize> = constraints
+        .iter()
+        .filter_map(|bc| coord_to_idx.get(&(bc.q, bc.r)).copied())
+        .collect();
+    constrained_indices.sort_unstable();
+    constrained_indices.dedup();
+    for &idx in &constrained_indices {
+        propagate(idx, &adj, &mut cells);
+    }
+
+    wfc_main_loop(&mut cells, &adj, rng);
+
+    let results = cells
+        .iter()
+        .map(|c| (c.terrain, c.proto_id, c.rotation, c.collapse_order))
+        .collect();
+    (results, fix_count)
 }
 
 /// Pick a candidate from the cell's remaining options, weighted by
@@ -467,6 +575,7 @@ struct WfcTile {
     prototype_id: u8,
     rotation: u8,
     elevation: i8,
+    collapse_order: u32,
 }
 
 #[derive(Serialize)]
@@ -478,6 +587,7 @@ struct WfcResult {
     tile_count: usize,
     void_count: usize,
     terrain_counts: [usize; TERRAIN_COUNT],
+    boundary_fix_count: usize,
     tiles: Vec<WfcTile>,
 }
 
@@ -509,7 +619,7 @@ pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32) -> String {
     let tiles: Vec<WfcTile> = coords
         .iter()
         .zip(results.iter())
-        .map(|(&(q, r), &(terrain, proto_id, rotation))| {
+        .map(|(&(q, r), &(terrain, proto_id, rotation, collapse_order))| {
             let elevation = if terrain == TERRAIN_VOID {
                 0
             } else {
@@ -522,13 +632,14 @@ pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32) -> String {
                 prototype_id: proto_id,
                 rotation,
                 elevation,
+                collapse_order,
             }
         })
         .collect();
 
     let mut terrain_counts = [0_usize; TERRAIN_COUNT];
     let mut void_count: usize = 0;
-    for &(terrain, _, _) in &results {
+    for &(terrain, _, _, _) in &results {
         if terrain == TERRAIN_VOID {
             void_count += 1;
         } else {
@@ -543,6 +654,75 @@ pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32) -> String {
         tile_count: tiles.len(),
         void_count,
         terrain_counts,
+        boundary_fix_count: 0,
+        tiles,
+    })
+    .expect("WFC result should serialize")
+}
+
+/// Generate a hex island with boundary constraints from neighbouring regions.
+///
+/// `constraints_json` is a JSON array of `{ q, r, dir, edge_type }` objects
+/// specifying edge constraints from already-populated neighbours.
+#[wasm_bindgen]
+pub fn generate_constrained(
+    seed_hi: u32,
+    seed_lo: u32,
+    radius: u32,
+    constraints_json: &str,
+) -> String {
+    let constraints: Vec<BoundaryConstraint> = if constraints_json.is_empty()
+        || constraints_json == "[]"
+    {
+        Vec::new()
+    } else {
+        serde_json::from_str(constraints_json)
+            .expect("invalid boundary constraints JSON")
+    };
+    let coords = hex_spiral(radius as i32);
+    let mut rng = ChaCha8Rng::from_seed(seed_from_halves(seed_hi, seed_lo));
+    let (results, boundary_fix_count) =
+        wfc_collapse_constrained(&coords, &mut rng, &constraints);
+
+    let tiles: Vec<WfcTile> = coords
+        .iter()
+        .zip(results.iter())
+        .map(|(&(q, r), &(terrain, proto_id, rotation, collapse_order))| {
+            let elevation = if terrain == TERRAIN_VOID {
+                0
+            } else {
+                PROTOTYPES[proto_id as usize].level_delta
+            };
+            WfcTile {
+                q,
+                r,
+                terrain,
+                prototype_id: proto_id,
+                rotation,
+                elevation,
+                collapse_order,
+            }
+        })
+        .collect();
+
+    let mut terrain_counts = [0_usize; TERRAIN_COUNT];
+    let mut void_count: usize = 0;
+    for &(terrain, _, _, _) in &results {
+        if terrain == TERRAIN_VOID {
+            void_count += 1;
+        } else {
+            terrain_counts[terrain as usize] += 1;
+        }
+    }
+
+    serde_json::to_string(&WfcResult {
+        seed_hex: format!("{seed_hi:08x}{seed_lo:08x}"),
+        generator: "wasm".to_owned(),
+        radius,
+        tile_count: tiles.len(),
+        void_count,
+        terrain_counts,
+        boundary_fix_count,
         tiles,
     })
     .expect("WFC result should serialize")
@@ -714,6 +894,205 @@ mod tests {
             totals[TERRAIN_SHALLOW as usize],
             totals[TERRAIN_DEEP as usize],
         );
+    }
+
+    #[test]
+    fn empty_constraints_match_unconstrained() {
+        let a = generate(0xdeadbeef, 0xcafe0001, 2);
+        let b = generate_constrained(0xdeadbeef, 0xcafe0001, 2, "[]");
+        let pa: WfcResult = serde_json::from_str(&a).unwrap();
+        let pb: WfcResult = serde_json::from_str(&b).unwrap();
+        assert_eq!(pa.tile_count, pb.tile_count);
+        assert_eq!(pa.boundary_fix_count, 0);
+        assert_eq!(pb.boundary_fix_count, 0);
+        for (ta, tb) in pa.tiles.iter().zip(pb.tiles.iter()) {
+            assert_eq!(ta.terrain, tb.terrain);
+            assert_eq!(ta.prototype_id, tb.prototype_id);
+            assert_eq!(ta.rotation, tb.rotation);
+        }
+    }
+
+    #[test]
+    fn seam_constraints_respected() {
+        // Generate region A at (0,0). Extract boundary edges.
+        // Generate region B at (1,0) with those constraints.
+        // Verify touching edges are compatible.
+        let radius: i32 = 2;
+        let spacing = 2 * radius + 1;
+
+        let result_a = generate(0xAAAA0000, 0xBBBB0000, radius as u32);
+        let ra: WfcResult = serde_json::from_str(&result_a).unwrap();
+
+        // Build tile lookup for region A
+        // Build constraints: for each tile in region A, check if its neighbour
+        // in any direction would land in region B's local space.
+        let b_coords: std::collections::HashSet<(i32, i32)> =
+            hex_spiral(radius).into_iter().collect();
+
+        let mut constraints = Vec::new();
+        let a_origin_q = 0_i32;
+        let a_origin_r = 0_i32;
+        let b_macro_q = 1_i32;
+        let b_macro_r = 0_i32;
+        let b_origin_q = b_macro_q * spacing;
+        let b_origin_r = b_macro_r * spacing;
+
+        for tile in &ra.tiles {
+            if tile.terrain == TERRAIN_VOID { continue; }
+            let world_q = a_origin_q + tile.q;
+            let world_r = a_origin_r + tile.r;
+            for (dir, &(dq, dr)) in HEX_DIRS.iter().enumerate() {
+                let adj_wq = world_q + dq;
+                let adj_wr = world_r + dr;
+                let local_q = adj_wq - b_origin_q;
+                let local_r = adj_wr - b_origin_r;
+                if b_coords.contains(&(local_q, local_r)) {
+                    let existing_edge = edge_at(
+                        &PROTOTYPES[tile.prototype_id as usize],
+                        dir,
+                        tile.rotation as usize,
+                    );
+                    constraints.push(BoundaryConstraint {
+                        q: local_q,
+                        r: local_r,
+                        dir: (dir + 3) % 6,
+                        edge_type: existing_edge,
+                    });
+                }
+            }
+        }
+
+        assert!(!constraints.is_empty(), "should have boundary constraints");
+
+        let cj = serde_json::to_string(&constraints).unwrap();
+        let result_b = generate_constrained(0xCCCC0000, 0xDDDD0000, radius as u32, &cj);
+        let rb: WfcResult = serde_json::from_str(&result_b).unwrap();
+
+        // Verify seam: touching edges must be compatible
+        let b_tiles: BTreeMap<(i32, i32), &WfcTile> = rb.tiles.iter()
+            .map(|t| ((t.q, t.r), t))
+            .collect();
+
+        for tile_a in &ra.tiles {
+            if tile_a.terrain == TERRAIN_VOID { continue; }
+            let wq = a_origin_q + tile_a.q;
+            let wr = a_origin_r + tile_a.r;
+            for (dir, &(dq, dr)) in HEX_DIRS.iter().enumerate() {
+                let adj_wq = wq + dq;
+                let adj_wr = wr + dr;
+                let lq = adj_wq - b_origin_q;
+                let lr = adj_wr - b_origin_r;
+                if let Some(tile_b) = b_tiles.get(&(lq, lr)) {
+                    if tile_b.terrain == TERRAIN_VOID { continue; }
+                    let opp = (dir + 3) % 6;
+                    let edge_a = edge_at(
+                        &PROTOTYPES[tile_a.prototype_id as usize],
+                        dir,
+                        tile_a.rotation as usize,
+                    );
+                    let edge_b = edge_at(
+                        &PROTOTYPES[tile_b.prototype_id as usize],
+                        opp,
+                        tile_b.rotation as usize,
+                    );
+                    let w = ADJ_WEIGHTS[edge_a as usize][edge_b as usize];
+                    assert!(
+                        w > 0,
+                        "seam incompatible: A({},{}) edge {} dir {} -> B({},{}) edge {} dir {}",
+                        tile_a.q, tile_a.r, edge_a, dir,
+                        tile_b.q, tile_b.r, edge_b, opp,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seam_constraints_multi_direction() {
+        // Test seam constraints across multiple macro directions and seeds.
+        // With radius=3 and more seeds, we get more boundary tiles and higher
+        // chance of filtering (e.g. deep water boundaries).
+        let radius: i32 = 3;
+        let spacing = 2 * radius + 1;
+
+        let b_coords: std::collections::HashSet<(i32, i32)> =
+            hex_spiral(radius).into_iter().collect();
+
+        for seed_i in 0..10_u32 {
+            for &(macro_dq, macro_dr) in &[(1_i32, 0_i32), (0, 1), (1, -1)] {
+                let result_a = generate(0x50000000 + seed_i, 0x60000000 + seed_i, radius as u32);
+                let ra: WfcResult = serde_json::from_str(&result_a).unwrap();
+
+                let b_origin_q = macro_dq * spacing;
+                let b_origin_r = macro_dr * spacing;
+
+                let mut constraints = Vec::new();
+                for tile in &ra.tiles {
+                    if tile.terrain == TERRAIN_VOID { continue; }
+                    for (dir, &(dq, dr)) in HEX_DIRS.iter().enumerate() {
+                        let adj_wq = tile.q + dq;
+                        let adj_wr = tile.r + dr;
+                        let local_q = adj_wq - b_origin_q;
+                        let local_r = adj_wr - b_origin_r;
+                        if b_coords.contains(&(local_q, local_r)) {
+                            let existing_edge = edge_at(
+                                &PROTOTYPES[tile.prototype_id as usize],
+                                dir,
+                                tile.rotation as usize,
+                            );
+                            constraints.push(BoundaryConstraint {
+                                q: local_q,
+                                r: local_r,
+                                dir: (dir + 3) % 6,
+                                edge_type: existing_edge,
+                            });
+                        }
+                    }
+                }
+
+                if constraints.is_empty() { continue; }
+
+                let cj = serde_json::to_string(&constraints).unwrap();
+                let result_b = generate_constrained(
+                    0x70000000 + seed_i, 0x80000000 + seed_i, radius as u32, &cj,
+                );
+                let rb: WfcResult = serde_json::from_str(&result_b).unwrap();
+
+                // Verify seam compatibility
+                let b_tiles: BTreeMap<(i32, i32), &WfcTile> = rb.tiles.iter()
+                    .map(|t| ((t.q, t.r), t))
+                    .collect();
+
+                for tile_a in &ra.tiles {
+                    if tile_a.terrain == TERRAIN_VOID { continue; }
+                    for (dir, &(dq, dr)) in HEX_DIRS.iter().enumerate() {
+                        let lq = tile_a.q + dq - b_origin_q;
+                        let lr = tile_a.r + dr - b_origin_r;
+                        if let Some(tile_b) = b_tiles.get(&(lq, lr)) {
+                            if tile_b.terrain == TERRAIN_VOID { continue; }
+                            let opp = (dir + 3) % 6;
+                            let edge_a = edge_at(
+                                &PROTOTYPES[tile_a.prototype_id as usize],
+                                dir,
+                                tile_a.rotation as usize,
+                            );
+                            let edge_b = edge_at(
+                                &PROTOTYPES[tile_b.prototype_id as usize],
+                                opp,
+                                tile_b.rotation as usize,
+                            );
+                            let w = ADJ_WEIGHTS[edge_a as usize][edge_b as usize];
+                            assert!(
+                                w > 0,
+                                "seam fail seed={seed_i} dir=({macro_dq},{macro_dr}): \
+                                 A({},{}) e{edge_a} d{dir} -> B({},{}) e{edge_b} d{opp}",
+                                tile_a.q, tile_a.r, tile_b.q, tile_b.r,
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

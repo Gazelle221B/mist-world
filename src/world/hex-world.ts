@@ -6,11 +6,23 @@
 // generated) or placeholders (awaiting expansion). Clicking a placeholder
 // in Build mode triggers WFC generation for that region.
 //
+// Seam constraints: when expanding a region adjacent to already-populated
+// regions, the boundary edges of existing tiles become fixed constraints
+// for the new region's WFC solve, ensuring seamless terrain transitions.
+//
 // Macro grid spacing = 2×radius + 1, so outermost tiles of adjacent
 // regions are hex-neighbours in world space.
 // ---------------------------------------------------------------------------
 
-import { generateIsland, type TileData } from "./wfc-bridge.ts";
+import {
+  type BoundaryConstraint,
+  edgeAt,
+  generateIsland,
+  generateIslandConstrained,
+  HEX_DIRS,
+  hexSpiral,
+  type TileData,
+} from "./wfc-bridge.ts";
 
 const MACRO_DIRS: ReadonlyArray<readonly [number, number]> = [
   [1, -1], [1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1],
@@ -21,6 +33,7 @@ export interface RegionState {
   readonly macroR: number;
   status: "populated" | "placeholder";
   tiles: TileData[] | null;
+  boundaryFixCount: number;
 }
 
 function regionKey(q: number, r: number): string {
@@ -34,11 +47,19 @@ export class HexWorld {
   readonly radius: number;
   readonly spacing: number;
 
+  /** Cached set of local coords for a region (radius-dependent). */
+  private readonly localCoordSet: Set<string>;
+
   constructor(radius: number, seedHi: number, seedLo: number) {
     this.radius = radius;
     this.spacing = 2 * radius + 1;
     this.seedHi = seedHi;
     this.seedLo = seedLo;
+
+    // Pre-compute the set of local coordinates for quick membership checks
+    this.localCoordSet = new Set(
+      hexSpiral(radius).map(([q, r]) => `${q},${r}`),
+    );
   }
 
   /** Initialize: populate center, add ring-1 placeholders. */
@@ -80,6 +101,15 @@ export class HexWorld {
     return this.populatedRegions().length;
   }
 
+  /** Total boundary fixes across all constrained generations. */
+  totalBoundaryFixes(): number {
+    let total = 0;
+    for (const region of this.regions.values()) {
+      total += region.boundaryFixCount;
+    }
+    return total;
+  }
+
   /** World hex coordinate for a tile within a macro region. */
   tileWorldHex(
     macroQ: number,
@@ -106,6 +136,80 @@ export class HexWorld {
   }
 
   // -----------------------------------------------------------------------
+  // Boundary constraint extraction
+  // -----------------------------------------------------------------------
+
+  /**
+   * Extract boundary constraints for a new region at (macroQ, macroR)
+   * from all populated neighbours.
+   *
+   * For each tile in each populated neighbour, check if any of its 6
+   * hex-direction neighbours fall within the new region's local coord
+   * space. If so, emit a BoundaryConstraint with the existing tile's
+   * edge type at that direction.
+   */
+  extractBoundaryConstraints(
+    macroQ: number,
+    macroR: number,
+  ): BoundaryConstraint[] {
+    const constraints: BoundaryConstraint[] = [];
+    const newOriginQ = macroQ * this.spacing;
+    const newOriginR = macroR * this.spacing;
+
+    for (const [dq, dr] of MACRO_DIRS) {
+      const nQ = macroQ + dq;
+      const nR = macroR + dr;
+      const key = regionKey(nQ, nR);
+      const neighbor = this.regions.get(key);
+      if (!neighbor || neighbor.status !== "populated" || !neighbor.tiles) {
+        continue;
+      }
+
+      const nOriginQ = nQ * this.spacing;
+      const nOriginR = nR * this.spacing;
+
+      for (const tile of neighbor.tiles) {
+        if (tile.terrain === 255) continue;
+
+        const worldQ = nOriginQ + tile.q;
+        const worldR = nOriginR + tile.r;
+
+        for (let d = 0; d < 6; d++) {
+          const adjWorldQ = worldQ + HEX_DIRS[d][0];
+          const adjWorldR = worldR + HEX_DIRS[d][1];
+
+          // Convert to new region's local coords
+          const localQ = adjWorldQ - newOriginQ;
+          const localR = adjWorldR - newOriginR;
+
+          if (this.localCoordSet.has(`${localQ},${localR}`)) {
+            const existingEdge = edgeAt(
+              tile.prototypeId,
+              d,
+              tile.rotation,
+            );
+            constraints.push({
+              q: localQ,
+              r: localR,
+              dir: (d + 3) % 6,
+              edge_type: existingEdge,
+            });
+          }
+        }
+      }
+    }
+
+    // Sort for deterministic ordering (independent of Map iteration order)
+    constraints.sort((a, b) =>
+      a.q !== b.q ? a.q - b.q :
+      a.r !== b.r ? a.r - b.r :
+      a.dir - b.dir
+    );
+
+    return constraints;
+  }
+
+  // -----------------------------------------------------------------------
   // Private helpers
   // -----------------------------------------------------------------------
 
@@ -113,7 +217,13 @@ export class HexWorld {
     const key = regionKey(macroQ, macroR);
     let region = this.regions.get(key);
     if (!region) {
-      region = { macroQ, macroR, status: "placeholder", tiles: null };
+      region = {
+        macroQ,
+        macroR,
+        status: "placeholder",
+        tiles: null,
+        boundaryFixCount: 0,
+      };
       this.regions.set(key, region);
     }
     this.populateRegion(region);
@@ -121,9 +231,18 @@ export class HexWorld {
 
   private populateRegion(region: RegionState): void {
     const { hi, lo } = this.deriveSeed(region.macroQ, region.macroR);
-    const result = generateIsland(hi, lo, this.radius);
+    const constraints = this.extractBoundaryConstraints(
+      region.macroQ,
+      region.macroR,
+    );
+
+    const result = constraints.length > 0
+      ? generateIslandConstrained(hi, lo, this.radius, constraints)
+      : generateIsland(hi, lo, this.radius);
+
     region.status = "populated";
     region.tiles = result.tiles;
+    region.boundaryFixCount = result.boundaryFixCount;
   }
 
   private ensurePlaceholder(macroQ: number, macroR: number): void {
@@ -134,6 +253,7 @@ export class HexWorld {
         macroR,
         status: "placeholder",
         tiles: null,
+        boundaryFixCount: 0,
       });
     }
   }

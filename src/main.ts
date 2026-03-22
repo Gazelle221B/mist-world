@@ -44,8 +44,10 @@ interface RuntimeState {
   radius: number;
   mode: InteractionMode;
   regionCount: number;
+  frontierCount: number;
   totalTileCount: number;
   voidCount: number;
+  boundaryFixCount: number;
   terrainCounts: number[];
 }
 
@@ -103,8 +105,10 @@ const state: RuntimeState = {
   radius: 2,
   mode: "move",
   regionCount: 0,
+  frontierCount: 0,
   totalTileCount: 0,
   voidCount: 0,
+  boundaryFixCount: 0,
   terrainCounts: [0, 0, 0, 0, 0, 0],
 };
 
@@ -153,8 +157,10 @@ function renderGameToText() {
     generator: state.generator,
     radius: state.radius,
     regionCount: state.regionCount,
+    frontierCount: state.frontierCount,
     totalTileCount: state.totalTileCount,
     voidCount: state.voidCount,
+    boundaryFixCount: state.boundaryFixCount,
     terrainCounts: state.terrainCounts,
     terrainCountsByName: terrainCountsByName(state.terrainCounts),
   });
@@ -240,13 +246,15 @@ async function bootstrap() {
     }
 
     state.regionCount = world.populatedCount();
+    state.frontierCount = world.placeholders().length;
     state.totalTileCount = total;
     state.voidCount = voids;
+    state.boundaryFixCount = world.totalBoundaryFixes();
     state.terrainCounts = counts;
   }
 
   /** Render all populated regions that haven't been rendered yet. */
-  async function renderNewRegions() {
+  async function renderNewRegions(animate: boolean = false) {
     for (const region of world.populatedRegions()) {
       const key = rkey(region.macroQ, region.macroR);
       if (regionHandles.has(key) || !region.tiles) continue;
@@ -257,6 +265,7 @@ async function bootstrap() {
         region.macroQ,
         region.macroR,
         world.spacing,
+        animate,
       );
       regionHandles.set(key, handle);
     }
@@ -312,22 +321,31 @@ async function bootstrap() {
   // Interaction: Build mode + placeholder clicking
   // -----------------------------------------------------------------------
 
+  let expanding = false;
+
   async function expandAt(macroQ: number, macroR: number) {
+    if (expanding) return; // prevent double-click during animation
+    expanding = true;
+    statusLine.textContent = `Building region (${macroQ}, ${macroR})...`;
+
     const ok = world.expand(macroQ, macroR);
     if (!ok) {
       statusLine.textContent = `Cannot expand at (${macroQ}, ${macroR}).`;
+      expanding = false;
       return;
     }
 
-    await renderNewRegions();
+    await renderNewRegions(true);
     rebuildPlaceholders();
     updateWorldStats();
     updateStatusLine();
+    expanding = false;
   }
 
   scene.onPointerObservable.add((pointerInfo) => {
     if (pointerInfo.type !== 1) return; // POINTERDOWN = 1
     if (state.mode !== "build") return;
+    if (expanding) return; // guard against clicks during expand
 
     const pickResult = scene.pick(
       scene.pointerX,
@@ -344,6 +362,7 @@ async function bootstrap() {
   });
 
   window.expand_region = (macroQ: number, macroR: number) => {
+    if (expanding) return;
     expandAt(macroQ, macroR);
   };
 
