@@ -76,20 +76,53 @@ const tsFallbackProvider: PreviewProvider = {
 };
 
 // ---------------------------------------------------------------------------
+// WASM provider
+// ---------------------------------------------------------------------------
+
+/** Shape of the JSON that Rust's `generate_preview` returns. */
+interface WasmPreviewJson {
+  seed_hex: string;
+  dominant_terrain: number;
+  tiles: Array<{ q: number; r: number; terrain: number }>;
+}
+
+function createWasmProvider(wasmModule: {
+  generate_preview: (seedHi: number, seedLo: number) => string;
+}): PreviewProvider {
+  return {
+    kind: "wasm",
+    generate(seedHi: number, seedLo: number): PreviewResult {
+      const json: WasmPreviewJson = JSON.parse(
+        wasmModule.generate_preview(seedHi, seedLo),
+      );
+      const tiles: TileData[] = json.tiles.map((t) => ({
+        q: t.q,
+        r: t.r,
+        terrain: t.terrain,
+      }));
+      return {
+        seedHex: json.seed_hex,
+        generator: "wasm",
+        tileCount: tiles.length,
+        tiles,
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Bridge — provider selection
 // ---------------------------------------------------------------------------
 
-/** Resolve the best available provider. Today: always ts-fallback. */
+/** Resolve the best available provider. Prefers WASM, falls back to TS. */
 async function resolveProvider(): Promise<PreviewProvider> {
-  // Future: try dynamic-importing the WASM module here.
-  //
-  //   try {
-  //     const wasm = await import("../wasm/mist-wfc/mist_wfc.js");
-  //     await wasm.default();          // init WASM
-  //     return wasmProvider(wasm);      // wrap in PreviewProvider
-  //   } catch { /* fall through */ }
-  //
-  return tsFallbackProvider;
+  try {
+    const wasm = await import("../wasm/mist-wfc/mist_wfc.js");
+    await wasm.default();
+    return createWasmProvider(wasm);
+  } catch {
+    return tsFallbackProvider;
+  }
 }
 
 let cachedProvider: PreviewProvider | null = null;

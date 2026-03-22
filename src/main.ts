@@ -171,8 +171,7 @@ async function bootstrap() {
   seaMaterial.alpha = 0.96;
   sea.material = seaMaterial;
 
-  const providerKind = await initBridge();
-  console.log(`[mist-world] WFC provider: ${providerKind}`);
+  await initBridge();
 
   state.renderer = renderer;
   state.sceneReady = true;

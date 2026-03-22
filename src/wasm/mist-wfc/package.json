@@ -1,0 +1,15 @@
+{
+  "name": "mist-wfc",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "mist_wfc_bg.wasm",
+    "mist_wfc.js",
+    "mist_wfc.d.ts"
+  ],
+  "main": "mist_wfc.js",
+  "types": "mist_wfc.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
