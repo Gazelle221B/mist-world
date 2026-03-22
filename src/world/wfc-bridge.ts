@@ -2,8 +2,8 @@
 // WFC Bridge — provider-based preview generation
 //
 // The bridge abstracts the preview generator behind a PreviewProvider
-// interface. Today only a TS fallback exists; when the Rust/WASM build is
-// ready, a "wasm" provider can be added without touching callers.
+// interface. At boot, resolveProvider() tries WASM first and falls back
+// to a pure-TS provider if the import fails.
 // ---------------------------------------------------------------------------
 
 export interface TileData {
