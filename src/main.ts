@@ -12,18 +12,26 @@ import {
   WebGPUEngine,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
-import { generateIsland, initBridge } from "./world/wfc-bridge.ts";
-import { type IslandHandle, renderIsland } from "./world/island-renderer.ts";
+import { initBridge } from "./world/wfc-bridge.ts";
+import {
+  type IslandHandle,
+  type PlaceholderHandle,
+  renderIsland,
+  renderPlaceholders,
+} from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
 import { terrainCountsByName } from "./world/terrain.ts";
+import { HexWorld } from "./world/hex-world.ts";
 
 declare global {
   interface Window {
     render_game_to_text?: () => string;
+    expand_region?: (macroQ: number, macroR: number) => void;
   }
 }
 
 type RendererKind = "webgpu" | "webgl2";
+type InteractionMode = "move" | "build";
 
 interface RuntimeState {
   renderer: RendererKind;
@@ -34,18 +42,17 @@ interface RuntimeState {
   seedHex: string;
   generator: "wasm" | "ts-fallback";
   radius: number;
-  tileCount: number;
+  mode: InteractionMode;
+  regionCount: number;
+  totalTileCount: number;
   voidCount: number;
   terrainCounts: number[];
-  tiles: Array<{ q: number; r: number; terrain: number; prototypeId: number; rotation: number; elevation: number }>;
 }
 
-function mustQuerySelector<ElementType extends Element>(selector: string): ElementType {
-  const element = document.querySelector<ElementType>(selector);
-  if (!element) {
-    throw new Error(`Missing required element: ${selector}`);
-  }
-  return element;
+function mustQuerySelector<T extends Element>(selector: string): T {
+  const el = document.querySelector<T>(selector);
+  if (!el) throw new Error(`Missing required element: ${selector}`);
+  return el;
 }
 
 const app = mustQuerySelector<HTMLDivElement>("#app");
@@ -55,7 +62,7 @@ app.innerHTML = `
     <header class="masthead">
       <p class="eyebrow">Mist World / Sprint 0</p>
       <h1>Babylon + WASM bootstrap</h1>
-      <p class="summary">Seeded island preview — hex grid vertical slice.</p>
+      <p class="summary">Expandable hex world — click placeholders to grow.</p>
     </header>
     <div class="viewport">
       <canvas id="render-canvas" aria-label="Mist World viewport"></canvas>
@@ -66,7 +73,8 @@ app.innerHTML = `
         <span id="seed-pill" class="pill pill--dim">seed: --</span>
         <span id="gen-pill" class="pill pill--dim">gen: --</span>
         <span id="radius-pill" class="pill pill--dim">r: --</span>
-        <span id="void-pill" class="pill pill--dim" style="display:none">void: 0</span>
+        <span id="mode-pill" class="pill pill--dim">mode: move</span>
+        <span id="region-pill" class="pill pill--dim">regions: 0</span>
       </div>
     </div>
     <p id="status-line" class="status-line">Preparing engine bootstrap...</p>
@@ -80,7 +88,8 @@ const meshPill = mustQuerySelector<HTMLSpanElement>("#mesh-pill");
 const seedPill = mustQuerySelector<HTMLSpanElement>("#seed-pill");
 const genPill = mustQuerySelector<HTMLSpanElement>("#gen-pill");
 const radiusPill = mustQuerySelector<HTMLSpanElement>("#radius-pill");
-const voidPill = mustQuerySelector<HTMLSpanElement>("#void-pill");
+const modePill = mustQuerySelector<HTMLSpanElement>("#mode-pill");
+const regionPill = mustQuerySelector<HTMLSpanElement>("#region-pill");
 const statusLine = mustQuerySelector<HTMLParagraphElement>("#status-line");
 
 const state: RuntimeState = {
@@ -92,10 +101,11 @@ const state: RuntimeState = {
   seedHex: "",
   generator: "ts-fallback",
   radius: 2,
-  tileCount: 0,
+  mode: "move",
+  regionCount: 0,
+  totalTileCount: 0,
   voidCount: 0,
   terrainCounts: [0, 0, 0, 0, 0, 0],
-  tiles: [],
 };
 
 async function createEngine(target: HTMLCanvasElement) {
@@ -127,11 +137,13 @@ function updateHud() {
   rendererPill.textContent = `renderer: ${state.renderer}`;
   fpsPill.textContent = `fps: ${state.fps.toFixed(1)}`;
   meshPill.textContent = `meshes: ${state.meshCount}`;
+  modePill.textContent = `mode: ${state.mode}`;
+  regionPill.textContent = `regions: ${state.regionCount}`;
 }
 
 function renderGameToText() {
   return JSON.stringify({
-    mode: "preview",
+    mode: state.mode,
     renderer: state.renderer,
     sceneReady: state.sceneReady,
     meshCount: state.meshCount,
@@ -140,11 +152,11 @@ function renderGameToText() {
     seedHex: state.seedHex,
     generator: state.generator,
     radius: state.radius,
-    tileCount: state.tileCount,
+    regionCount: state.regionCount,
+    totalTileCount: state.totalTileCount,
     voidCount: state.voidCount,
     terrainCounts: state.terrainCounts,
     terrainCountsByName: terrainCountsByName(state.terrainCounts),
-    tiles: state.tiles,
   });
 }
 
@@ -157,12 +169,12 @@ async function bootstrap() {
     "orbit-camera",
     Math.PI / 3,
     1.1,
-    11,
+    14,
     Vector3.Zero(),
     scene,
   );
   camera.lowerRadiusLimit = 6;
-  camera.upperRadiusLimit = 18;
+  camera.upperRadiusLimit = 40;
   camera.wheelDeltaPercentage = 0.02;
   camera.attachControl(canvas, true);
 
@@ -171,14 +183,11 @@ async function bootstrap() {
 
   const sea = MeshBuilder.CreateGround(
     "sea",
-    {
-      width: 22,
-      height: 22,
-      subdivisions: 2,
-    },
+    { width: 60, height: 60, subdivisions: 2 },
     scene,
   );
   sea.position.y = -0.82;
+  sea.isPickable = false;
 
   const seaMaterial = new StandardMaterial("sea-material", scene);
   seaMaterial.diffuseColor.set(0.39, 0.62, 0.68);
@@ -186,53 +195,161 @@ async function bootstrap() {
   seaMaterial.alpha = 0.96;
   sea.material = seaMaterial;
 
-  await initBridge();
+  const genKind = await initBridge();
 
   state.renderer = renderer;
   state.sceneReady = true;
+  state.generator = genKind;
 
-  let currentIsland: IslandHandle | null = null;
+  // -----------------------------------------------------------------------
+  // World state
+  // -----------------------------------------------------------------------
 
-  async function rebuildPreview() {
-    const seed = seedFromHash();
-    const radius = radiusFromQuery();
-    const preview = generateIsland(seed.hi, seed.lo, radius);
+  const seed = seedFromHash();
+  const radius = radiusFromQuery();
+  state.radius = radius;
+  state.seedHex = `${(seed.hi >>> 0).toString(16).padStart(8, "0")}${(seed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
-    if (preview.seedHex === state.seedHex && radius === state.radius) return;
+  const world = new HexWorld(radius, seed.hi, seed.lo);
+  world.init();
 
-    if (currentIsland) {
-      currentIsland.dispose();
-      currentIsland = null;
+  // Track rendered regions and placeholders
+  const regionHandles = new Map<string, IslandHandle>();
+  let placeholderHandle: PlaceholderHandle | null = null;
+
+  function rkey(q: number, r: number): string {
+    return `${q},${r}`;
+  }
+
+  /** Aggregate terrain stats from all populated regions. */
+  function updateWorldStats() {
+    const counts = [0, 0, 0, 0, 0, 0];
+    let total = 0;
+    let voids = 0;
+
+    for (const region of world.populatedRegions()) {
+      if (!region.tiles) continue;
+      for (const tile of region.tiles) {
+        total++;
+        if (tile.terrain === 255) {
+          voids++;
+        } else {
+          counts[tile.terrain]++;
+        }
+      }
     }
 
-    currentIsland = await renderIsland(scene, preview.tiles);
+    state.regionCount = world.populatedCount();
+    state.totalTileCount = total;
+    state.voidCount = voids;
+    state.terrainCounts = counts;
+  }
 
-    state.seedHex = preview.seedHex;
-    state.generator = preview.generator;
-    state.radius = radius;
-    state.tileCount = preview.tileCount;
-    state.voidCount = preview.voidCount;
-    state.terrainCounts = preview.terrainCounts;
-    state.tiles = preview.tiles;
+  /** Render all populated regions that haven't been rendered yet. */
+  async function renderNewRegions() {
+    for (const region of world.populatedRegions()) {
+      const key = rkey(region.macroQ, region.macroR);
+      if (regionHandles.has(key) || !region.tiles) continue;
 
-    seedPill.textContent = `seed: ${preview.seedHex}`;
-    genPill.textContent = `gen: ${preview.generator}`;
-    radiusPill.textContent = `r: ${radius}`;
-
-    if (preview.voidCount > 0) {
-      voidPill.textContent = `void: ${preview.voidCount}`;
-      voidPill.style.display = "";
-      voidPill.style.color = "#d32f2f";
-      statusLine.textContent =
-        `Warning: ${preview.voidCount} void tile(s) — WFC contradiction detected. seed ${preview.seedHex}`;
-    } else {
-      voidPill.style.display = "none";
-      statusLine.textContent =
-        `Preview: seed ${preview.seedHex} (${preview.generator}) — ${preview.tileCount} tiles. Drag to orbit, scroll to zoom.`;
+      const handle = await renderIsland(
+        scene,
+        region.tiles,
+        region.macroQ,
+        region.macroR,
+        world.spacing,
+      );
+      regionHandles.set(key, handle);
     }
   }
 
-  await rebuildPreview();
+  /** Rebuild placeholder visuals. */
+  function rebuildPlaceholders() {
+    if (placeholderHandle) {
+      placeholderHandle.dispose();
+      placeholderHandle = null;
+    }
+
+    const phs = world.placeholders();
+    if (phs.length > 0) {
+      placeholderHandle = renderPlaceholders(scene, phs, world.spacing);
+    }
+  }
+
+  /** Full rebuild: dispose all, regenerate from world state. */
+  async function fullRebuild() {
+    for (const handle of regionHandles.values()) handle.dispose();
+    regionHandles.clear();
+    if (placeholderHandle) {
+      placeholderHandle.dispose();
+      placeholderHandle = null;
+    }
+
+    await renderNewRegions();
+    rebuildPlaceholders();
+    updateWorldStats();
+    updateStatusLine();
+  }
+
+  function updateStatusLine() {
+    seedPill.textContent = `seed: ${state.seedHex}`;
+    genPill.textContent = `gen: ${state.generator}`;
+    radiusPill.textContent = `r: ${state.radius}`;
+
+    if (state.voidCount > 0) {
+      statusLine.textContent =
+        `Warning: ${state.voidCount} void tile(s) — WFC contradiction. seed ${state.seedHex}`;
+    } else {
+      statusLine.textContent =
+        `${state.regionCount} region(s), ${state.totalTileCount} tiles. ` +
+        `[B] toggle build mode. Click placeholder to expand.`;
+    }
+  }
+
+  // Initial render
+  await fullRebuild();
+
+  // -----------------------------------------------------------------------
+  // Interaction: Build mode + placeholder clicking
+  // -----------------------------------------------------------------------
+
+  async function expandAt(macroQ: number, macroR: number) {
+    const ok = world.expand(macroQ, macroR);
+    if (!ok) {
+      statusLine.textContent = `Cannot expand at (${macroQ}, ${macroR}).`;
+      return;
+    }
+
+    await renderNewRegions();
+    rebuildPlaceholders();
+    updateWorldStats();
+    updateStatusLine();
+  }
+
+  scene.onPointerObservable.add((pointerInfo) => {
+    if (pointerInfo.type !== 1) return; // POINTERDOWN = 1
+    if (state.mode !== "build") return;
+
+    const pickResult = scene.pick(
+      scene.pointerX,
+      scene.pointerY,
+      (mesh) => mesh.metadata?.macroQ !== undefined,
+    );
+    if (!pickResult?.hit || !pickResult.pickedMesh) return;
+
+    const meta = pickResult.pickedMesh.metadata as {
+      macroQ: number;
+      macroR: number;
+    };
+    expandAt(meta.macroQ, meta.macroR);
+  });
+
+  window.expand_region = (macroQ: number, macroR: number) => {
+    expandAt(macroQ, macroR);
+  };
+
+  // -----------------------------------------------------------------------
+  // Render loop + keyboard
+  // -----------------------------------------------------------------------
 
   const step = () => {
     state.meshCount = scene.meshes.length;
@@ -249,11 +366,29 @@ async function bootstrap() {
   window.render_game_to_text = renderGameToText;
 
   window.addEventListener("hashchange", () => {
-    rebuildPreview();
+    const newSeed = seedFromHash();
+    const newRadius = radiusFromQuery();
+    const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
+
+    if (hex === state.seedHex && newRadius === state.radius) return;
+
+    state.seedHex = hex;
+    state.radius = newRadius;
+    world.reset(newSeed.hi, newSeed.lo);
+    fullRebuild();
   });
 
   window.addEventListener("keydown", async (event) => {
-    if (event.key.toLowerCase() === "f") {
+    const key = event.key.toLowerCase();
+
+    if (key === "b") {
+      state.mode = state.mode === "move" ? "build" : "move";
+      modePill.textContent = `mode: ${state.mode}`;
+      // Visual feedback: show/hide placeholder edges
+      canvas.style.cursor = state.mode === "build" ? "crosshair" : "default";
+    }
+
+    if (key === "f") {
       if (document.fullscreenElement) {
         await document.exitFullscreen();
       } else {
