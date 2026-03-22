@@ -8,49 +8,88 @@ import {
 } from "@babylonjs/core";
 import type { TileData } from "./wfc-bridge.ts";
 import { axialToWorld } from "./hex-grid.ts";
-import { lookupTile } from "./tile-registry.ts";
+import {
+  lookupTile,
+  type MeshDescriptor,
+  type TileDescriptor,
+} from "./tile-registry.ts";
 
 export interface IslandHandle {
-  mesh: Mesh;
-  material: StandardMaterial;
+  dispose(): void;
+}
+
+interface TileEntry {
+  tile: TileData;
+  desc: TileDescriptor;
+}
+
+function createSourceMesh(
+  md: MeshDescriptor,
+  scene: Scene,
+  material: StandardMaterial,
+): Mesh {
+  if (md.kind === "primitive" && md.primitive === "hex-cylinder") {
+    const mesh = MeshBuilder.CreateCylinder(
+      `src-${md.key}`,
+      { tessellation: md.tessellation, diameter: md.diameter, height: md.height },
+      scene,
+    );
+    mesh.material = material;
+    mesh.rotation.y = md.rotationY;
+    mesh.hasVertexAlpha = true;
+    return mesh;
+  }
+  throw new Error(`Unsupported mesh descriptor: ${md.kind}/${(md as MeshDescriptor).primitive}`);
 }
 
 export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {
   const material = new StandardMaterial("hex-terrain", scene);
   material.diffuseColor = new Color3(1, 1, 1);
   material.specularColor = new Color3(0.1, 0.1, 0.1);
-  const source = MeshBuilder.CreateCylinder(
-    "hex-source",
-    { tessellation: 6, diameter: 1.73, height: 1 },
-    scene,
-  );
-  source.material = material;
-  source.rotation.y = Math.PI / 6;
-  source.hasVertexAlpha = true;
 
-  const matrices: Matrix[] = [];
-  const colorData = new Float32Array(tiles.length * 4);
+  // Group tiles by mesh descriptor key
+  const groups = new Map<string, { md: MeshDescriptor; entries: TileEntry[] }>();
 
-  for (let i = 0; i < tiles.length; i++) {
-    const tile = tiles[i];
+  for (const tile of tiles) {
     const desc = lookupTile(tile.terrain);
-    const { x, z } = axialToWorld(tile.q, tile.r);
-    matrices.push(
-      Matrix.Scaling(1, desc.height / 1, 1).multiply(
-        Matrix.Translation(x, desc.yOffset, z),
-      ),
-    );
-
-    colorData[i * 4 + 0] = desc.color.r;
-    colorData[i * 4 + 1] = desc.color.g;
-    colorData[i * 4 + 2] = desc.color.b;
-    colorData[i * 4 + 3] = desc.color.a;
+    const meshKey = desc.mesh.key;
+    let group = groups.get(meshKey);
+    if (!group) {
+      group = { md: desc.mesh, entries: [] };
+      groups.set(meshKey, group);
+    }
+    group.entries.push({ tile, desc });
   }
 
-  for (const matrix of matrices) {
-    source.thinInstanceAdd(matrix);
-  }
-  source.thinInstanceSetBuffer("color", colorData, 4);
+  // Build source meshes and thin instances per group
+  const meshes: Mesh[] = [];
 
-  return { mesh: source, material };
+  for (const [, group] of groups) {
+    const source = createSourceMesh(group.md, scene, material);
+    const colorData = new Float32Array(group.entries.length * 4);
+
+    for (let i = 0; i < group.entries.length; i++) {
+      const { tile, desc } = group.entries[i];
+      const { x, z } = axialToWorld(tile.q, tile.r);
+      source.thinInstanceAdd(
+        Matrix.Scaling(1, desc.height, 1).multiply(
+          Matrix.Translation(x, desc.yOffset, z),
+        ),
+      );
+      colorData[i * 4 + 0] = desc.color.r;
+      colorData[i * 4 + 1] = desc.color.g;
+      colorData[i * 4 + 2] = desc.color.b;
+      colorData[i * 4 + 3] = desc.color.a;
+    }
+
+    source.thinInstanceSetBuffer("color", colorData, 4);
+    meshes.push(source);
+  }
+
+  return {
+    dispose() {
+      for (const m of meshes) m.dispose();
+      material.dispose();
+    },
+  };
 }

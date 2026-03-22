@@ -201,8 +201,7 @@ async function bootstrap() {
     if (preview.seedHex === state.seedHex && radius === state.radius) return;
 
     if (currentIsland) {
-      currentIsland.mesh.dispose();
-      currentIsland.material.dispose();
+      currentIsland.dispose();
       currentIsland = null;
     }
 
