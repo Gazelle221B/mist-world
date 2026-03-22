@@ -28,6 +28,12 @@ const MACRO_DIRS: ReadonlyArray<readonly [number, number]> = [
   [1, -1], [1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1],
 ] as const;
 
+/** A tile with world-space hex coordinates (not local to a region). */
+export interface WorldTile extends TileData {
+  worldQ: number;
+  worldR: number;
+}
+
 export interface RegionState {
   readonly macroQ: number;
   readonly macroR: number;
@@ -42,6 +48,7 @@ function regionKey(q: number, r: number): string {
 
 export class HexWorld {
   private readonly regions = new Map<string, RegionState>();
+  private readonly _globalTiles = new Map<string, WorldTile>();
   private seedHi: number;
   private seedLo: number;
   readonly radius: number;
@@ -65,6 +72,7 @@ export class HexWorld {
   /** Initialize: populate center, add ring-1 placeholders. */
   init(): void {
     this.regions.clear();
+    this._globalTiles.clear();
     this.populateAt(0, 0);
     for (const [dq, dr] of MACRO_DIRS) {
       this.ensurePlaceholder(dq, dr);
@@ -99,6 +107,28 @@ export class HexWorld {
   /** Number of populated regions. */
   populatedCount(): number {
     return this.populatedRegions().length;
+  }
+
+  /** All tiles across all populated regions, in world coordinates. */
+  allTiles(): WorldTile[] {
+    return [...this._globalTiles.values()];
+  }
+
+  /** Total tile count in the global map (excludes VOIDs). */
+  globalTileCount(): number {
+    return this._globalTiles.size;
+  }
+
+  /** Count VOID tiles across all regions (not in globalTiles). */
+  totalVoidCount(): number {
+    let count = 0;
+    for (const region of this.regions.values()) {
+      if (region.status !== "populated" || !region.tiles) continue;
+      for (const tile of region.tiles) {
+        if (tile.terrain === 255) count++;
+      }
+    }
+    return count;
   }
 
   /** Total boundary fixes across all constrained generations. */
@@ -243,6 +273,20 @@ export class HexWorld {
     region.status = "populated";
     region.tiles = result.tiles;
     region.boundaryFixCount = result.boundaryFixCount;
+
+    // Merge into global tile map (world coordinates)
+    for (const tile of result.tiles) {
+      if (tile.terrain === 255) continue; // skip VOID
+      const wq = region.macroQ * this.spacing + tile.q;
+      const wr = region.macroR * this.spacing + tile.r;
+      this._globalTiles.set(`${wq},${wr}`, {
+        ...tile,
+        q: wq,
+        r: wr,
+        worldQ: wq,
+        worldR: wr,
+      });
+    }
   }
 
   private ensurePlaceholder(macroQ: number, macroR: number): void {
