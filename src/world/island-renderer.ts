@@ -24,6 +24,7 @@ import {
   StandardMaterial,
 } from "@babylonjs/core";
 import type { TileData } from "./wfc-bridge.ts";
+import type { WorldTile } from "./hex-world.ts";
 import { axialToWorld } from "./hex-grid.ts";
 import { loadMeshDescriptor } from "./asset-loader.ts";
 import {
@@ -237,6 +238,75 @@ export async function renderIsland(
         observer = null;
       }
       isAnimating = false;
+      for (const m of meshes) m.dispose();
+      material.dispose();
+    },
+  };
+}
+
+/**
+ * Render the entire world as a single unified terrain from world-coord tiles.
+ *
+ * Unlike renderIsland(), tiles already have world-space q/r so no macro
+ * offset is needed. No animation — full redraw is the current strategy.
+ */
+export async function renderWorld(
+  scene: Scene,
+  tiles: WorldTile[],
+): Promise<IslandHandle> {
+  const material = new StandardMaterial("hex-terrain", scene);
+  material.diffuseColor = new Color3(1, 1, 1);
+  material.specularColor = new Color3(0.1, 0.1, 0.1);
+
+  const groups = new Map<
+    string,
+    { md: MeshDescriptor; entries: { tile: WorldTile; desc: PrototypeDescriptor }[] }
+  >();
+
+  for (const tile of tiles) {
+    const desc = lookupPrototype(tile.prototypeId, tile.terrain);
+    const meshKey = desc.mesh.key;
+    let group = groups.get(meshKey);
+    if (!group) {
+      group = { md: desc.mesh, entries: [] };
+      groups.set(meshKey, group);
+    }
+    group.entries.push({ tile, desc });
+  }
+
+  const meshes: Mesh[] = [];
+
+  for (const [, group] of groups) {
+    const source = await loadMeshDescriptor(scene, material, group.md);
+    source.setEnabled(true);
+    const colorData = new Float32Array(group.entries.length * 4);
+
+    for (let i = 0; i < group.entries.length; i++) {
+      const { tile, desc } = group.entries[i];
+      const { x, z } = axialToWorld(tile.q, tile.r);
+      const rotY = tile.rotation * (Math.PI / 3);
+
+      const matrix = Matrix.Scaling(1, desc.height, 1)
+        .multiply(Matrix.RotationY(rotY))
+        .multiply(Matrix.Translation(x, desc.yOffset, z));
+
+      source.thinInstanceAdd(matrix);
+
+      colorData[i * 4 + 0] = desc.color.r;
+      colorData[i * 4 + 1] = desc.color.g;
+      colorData[i * 4 + 2] = desc.color.b;
+      colorData[i * 4 + 3] = desc.color.a;
+    }
+
+    source.thinInstanceSetBuffer("color", colorData, 4);
+    meshes.push(source);
+  }
+
+  return {
+    get animating() {
+      return false;
+    },
+    dispose() {
       for (const m of meshes) m.dispose();
       material.dispose();
     },
