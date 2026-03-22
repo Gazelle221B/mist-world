@@ -8,7 +8,7 @@ import {
 } from "@babylonjs/core";
 import type { TileData } from "./wfc-bridge.ts";
 import { axialToWorld } from "./hex-grid.ts";
-import { terrainColor } from "./terrain.ts";
+import { lookupTile } from "./tile-registry.ts";
 
 export interface IslandHandle {
   mesh: Mesh;
@@ -21,7 +21,7 @@ export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {
   material.specularColor = new Color3(0.1, 0.1, 0.1);
   const source = MeshBuilder.CreateCylinder(
     "hex-source",
-    { tessellation: 6, diameter: 1.73, height: 0.3 },
+    { tessellation: 6, diameter: 1.73, height: 1 },
     scene,
   );
   source.material = material;
@@ -33,14 +33,18 @@ export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {
 
   for (let i = 0; i < tiles.length; i++) {
     const tile = tiles[i];
+    const desc = lookupTile(tile.terrain);
     const { x, z } = axialToWorld(tile.q, tile.r);
-    matrices.push(Matrix.Translation(x, 0, z));
+    matrices.push(
+      Matrix.Scaling(1, desc.height / 1, 1).multiply(
+        Matrix.Translation(x, desc.yOffset, z),
+      ),
+    );
 
-    const color = terrainColor(tile.terrain);
-    colorData[i * 4 + 0] = color.r;
-    colorData[i * 4 + 1] = color.g;
-    colorData[i * 4 + 2] = color.b;
-    colorData[i * 4 + 3] = color.a;
+    colorData[i * 4 + 0] = desc.color.r;
+    colorData[i * 4 + 1] = desc.color.g;
+    colorData[i * 4 + 2] = desc.color.b;
+    colorData[i * 4 + 3] = desc.color.a;
   }
 
   for (const matrix of matrices) {
