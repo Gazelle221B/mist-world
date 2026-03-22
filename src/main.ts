@@ -94,7 +94,7 @@ const state: RuntimeState = {
   radius: 2,
   tileCount: 0,
   voidCount: 0,
-  terrainCounts: [0, 0, 0, 0],
+  terrainCounts: [0, 0, 0, 0, 0],
   tiles: [],
 };
 

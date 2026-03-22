@@ -61,7 +61,7 @@ fn hex_spiral(radius: i32) -> Vec<(i32, i32)> {
 // ---------------------------------------------------------------------------
 
 /// Terrain IDs:
-///   0 = grass, 1 = sand, 2 = rock, 3 = water, 4 = VOID (contradiction)
+///   0 = grass, 1 = sand, 2 = rock, 3 = water, 4 = forest, 5 = VOID
 #[allow(dead_code)]
 const TERRAIN_GRASS: u8 = 0;
 #[allow(dead_code)]
@@ -70,30 +70,34 @@ const TERRAIN_SAND: u8 = 1;
 const TERRAIN_ROCK: u8 = 2;
 #[allow(dead_code)]
 const TERRAIN_WATER: u8 = 3;
-const TERRAIN_VOID: u8 = 4;
+#[allow(dead_code)]
+const TERRAIN_FOREST: u8 = 4;
+const TERRAIN_VOID: u8 = 5;
 
 /// Number of placeable terrain types (excludes VOID).
-const TERRAIN_COUNT: usize = 4;
+const TERRAIN_COUNT: usize = 5;
 
 /// Base weights control global terrain distribution independent of neighbours.
 /// Higher values make a terrain appear more often across the whole island.
-///   grass=6, sand=4, rock=3, water=2
-const BASE_WEIGHTS: [u32; TERRAIN_COUNT] = [6, 4, 3, 2];
+///   grass=6, sand=4, rock=3, water=2, forest=5
+const BASE_WEIGHTS: [u32; TERRAIN_COUNT] = [6, 4, 3, 2, 5];
 
 /// Adjacency weight table: `ADJ_WEIGHTS[from][to]` is the integer weight
 /// for terrain `to` appearing next to terrain `from`. Zero means forbidden.
 /// VOID is never a WFC candidate — it only appears on contradiction.
 ///
-/// grass(0) — prefers grass, sand; avoids water
-/// sand(1)  — bridges grass and water
-/// rock(2)  — prefers rock, grass; avoids water
-/// water(3) — prefers water, sand; avoids grass, rock
+/// grass(0)  — prefers grass, sand, forest; avoids water
+/// sand(1)   — bridges grass and water; low forest affinity
+/// rock(2)   — prefers rock, grass, forest; avoids water
+/// water(3)  — prefers water, sand; avoids grass, rock, forest
+/// forest(4) — prefers forest, grass, rock; low sand; avoids water
 const ADJ_WEIGHTS: [[u32; TERRAIN_COUNT]; TERRAIN_COUNT] = [
-    // to:  grass  sand  rock  water
-    [  10,    6,    4,    0 ],  // from grass
-    [   6,    8,    3,    5 ],  // from sand
-    [   4,    3,   10,    0 ],  // from rock
-    [   0,    5,    0,   10 ],  // from water
+    // to:  grass  sand  rock  water  forest
+    [  10,    6,    4,    0,    8 ],  // from grass
+    [   6,    8,    3,    5,    2 ],  // from sand
+    [   4,    3,   10,    0,    6 ],  // from rock
+    [   0,    5,    0,   10,    0 ],  // from water
+    [   8,    2,    6,    0,   10 ],  // from forest
 ];
 
 // ---------------------------------------------------------------------------
@@ -465,23 +469,23 @@ mod tests {
 
     #[test]
     fn distribution_no_extreme_bias() {
-        // Over 20 different seeds at radius=2, no single terrain should
-        // monopolise (>14 of 19) or be completely absent (0) across all runs,
-        // and void should never appear.
+        // Over 20 different seeds at radius=3 (37 tiles), no single terrain
+        // should monopolise (>25 of 37), void should never appear, and each
+        // terrain should appear at least once across all runs combined.
         let mut totals = [0_usize; TERRAIN_COUNT];
         let mut total_void = 0_usize;
         let runs = 20_u32;
 
         for i in 0..runs {
-            let result = generate(0x10000000 + i, 0x20000000 + i, 2);
+            let result = generate(0x10000000 + i, 0x20000000 + i, 3);
             let parsed: WfcResult = serde_json::from_str(&result).unwrap();
             assert_eq!(parsed.void_count, 0, "void found in seed {i}");
             total_void += parsed.void_count;
             for (t, &c) in parsed.terrain_counts.iter().enumerate() {
                 totals[t] += c;
                 assert!(
-                    c <= 14,
-                    "terrain {t} has {c}/19 tiles in seed {i} — extreme monopoly",
+                    c <= 25,
+                    "terrain {t} has {c}/37 tiles in seed {i} — extreme monopoly",
                 );
             }
         }
