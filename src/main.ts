@@ -15,6 +15,7 @@ import "@babylonjs/loaders/glTF";
 import { generateIsland, initBridge } from "./world/wfc-bridge.ts";
 import { type IslandHandle, renderIsland } from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
+import { terrainCountsByName } from "./world/terrain.ts";
 
 declare global {
   interface Window {
@@ -142,6 +143,7 @@ function renderGameToText() {
     tileCount: state.tileCount,
     voidCount: state.voidCount,
     terrainCounts: state.terrainCounts,
+    terrainCountsByName: terrainCountsByName(state.terrainCounts),
     tiles: state.tiles,
   });
 }
