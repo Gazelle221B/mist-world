@@ -28,18 +28,21 @@ function createSourceMesh(
   scene: Scene,
   material: StandardMaterial,
 ): Mesh {
-  if (md.kind === "primitive" && md.primitive === "hex-cylinder") {
-    const mesh = MeshBuilder.CreateCylinder(
-      `src-${md.key}`,
-      { tessellation: md.tessellation, diameter: md.diameter, height: md.height },
-      scene,
-    );
-    mesh.material = material;
-    mesh.rotation.y = md.rotationY;
-    mesh.hasVertexAlpha = true;
-    return mesh;
+  switch (md.kind) {
+    case "primitive": {
+      const mesh = MeshBuilder.CreateCylinder(
+        `src-${md.key}`,
+        { tessellation: md.tessellation, diameter: md.diameter, height: md.height },
+        scene,
+      );
+      mesh.material = material;
+      mesh.rotation.y = md.rotationY;
+      mesh.hasVertexAlpha = true;
+      return mesh;
+    }
+    case "gltf":
+      throw new Error("glTF mesh descriptors are not wired yet");
   }
-  throw new Error(`Unsupported mesh descriptor: ${md.kind}/${(md as MeshDescriptor).primitive}`);
 }
 
 export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {

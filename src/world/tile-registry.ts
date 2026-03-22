@@ -23,8 +23,16 @@ export interface PrimitiveMeshDescriptor {
   readonly rotationY: number;
 }
 
-/** Extend this union when adding glTF or other mesh sources. */
-export type MeshDescriptor = PrimitiveMeshDescriptor;
+export interface GltfMeshDescriptor {
+  readonly kind: "gltf";
+  readonly key: string;
+  readonly assetKey: string;
+  readonly meshName: string;
+  readonly scale: number;
+  readonly rotationY: number;
+}
+
+export type MeshDescriptor = PrimitiveMeshDescriptor | GltfMeshDescriptor;
 
 const HEX_CYLINDER: PrimitiveMeshDescriptor = {
   kind: "primitive",
