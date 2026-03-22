@@ -56,10 +56,12 @@ export async function renderIsland(
     for (let i = 0; i < group.entries.length; i++) {
       const { tile, desc } = group.entries[i];
       const { x, z } = axialToWorld(tile.q, tile.r);
+      // Each WFC rotation step = 60° (π/3 radians) around Y axis
+      const rotY = tile.rotation * (Math.PI / 3);
       source.thinInstanceAdd(
-        Matrix.Scaling(1, desc.height, 1).multiply(
-          Matrix.Translation(x, desc.yOffset, z),
-        ),
+        Matrix.Scaling(1, desc.height, 1)
+          .multiply(Matrix.RotationY(rotY))
+          .multiply(Matrix.Translation(x, desc.yOffset, z)),
       );
       colorData[i * 4 + 0] = desc.color.r;
       colorData[i * 4 + 1] = desc.color.g;
