@@ -37,7 +37,7 @@ interface RuntimeState {
   tileCount: number;
   voidCount: number;
   terrainCounts: number[];
-  tiles: Array<{ q: number; r: number; terrain: number }>;
+  tiles: Array<{ q: number; r: number; terrain: number; prototypeId: number; rotation: number; elevation: number }>;
 }
 
 function mustQuerySelector<ElementType extends Element>(selector: string): ElementType {

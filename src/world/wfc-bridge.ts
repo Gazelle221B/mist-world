@@ -10,6 +10,9 @@ export interface TileData {
   q: number;
   r: number;
   terrain: number;
+  prototypeId: number;
+  rotation: number;
+  elevation: number;
 }
 
 export interface GenerateResult {
@@ -80,11 +83,17 @@ const tsFallbackProvider: GeneratorProvider = {
   kind: "ts-fallback",
   generate(seedHi: number, seedLo: number, radius: number): GenerateResult {
     const coords = hexSpiral(radius);
-    const tiles: TileData[] = coords.map(([q, r], index) => ({
-      q,
-      r,
-      terrain: terrainFromSeed(seedHi, seedLo, index),
-    }));
+    const tiles: TileData[] = coords.map(([q, r], index) => {
+      const terrain = terrainFromSeed(seedHi, seedLo, index);
+      return {
+        q,
+        r,
+        terrain,
+        prototypeId: terrain, // fallback: 1:1 mapping terrain→prototype
+        rotation: 0,
+        elevation: 0,
+      };
+    });
 
     const terrainCounts = [0, 0, 0, 0, 0, 0];
     let voidCount = 0;
@@ -120,7 +129,14 @@ interface WasmGenerateJson {
   tile_count: number;
   void_count: number;
   terrain_counts: number[];
-  tiles: Array<{ q: number; r: number; terrain: number }>;
+  tiles: Array<{
+    q: number;
+    r: number;
+    terrain: number;
+    prototype_id: number;
+    rotation: number;
+    elevation: number;
+  }>;
 }
 
 function createWasmProvider(wasmModule: {
@@ -136,6 +152,9 @@ function createWasmProvider(wasmModule: {
         q: t.q,
         r: t.r,
         terrain: t.terrain,
+        prototypeId: t.prototype_id,
+        rotation: t.rotation,
+        elevation: t.elevation,
       }));
       return {
         seedHex: json.seed_hex,

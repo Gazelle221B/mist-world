@@ -17,7 +17,7 @@ export function engine_version() {
 }
 
 /**
- * Generate a hex island using integer WFC.
+ * Generate a hex island using prototype-based integer WFC.
  *
  * `radius` controls how many hex rings to generate:
  *   0 → 1 tile, 1 → 7 tiles, 2 → 19 tiles, 3 → 37 tiles, etc.
