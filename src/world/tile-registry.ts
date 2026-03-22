@@ -72,7 +72,7 @@ const descriptors: ReadonlyMap<number, TileDescriptor> = new Map(
   [
     { id: 0, key: "grass",        label: "Grass",         color: new Color4(0.56, 0.74, 0.34, 1), height: 0.30, yOffset: 0.0,   mesh: HEX_CYLINDER },
     { id: 1, key: "sand",         label: "Sand",          color: new Color4(0.87, 0.82, 0.60, 1), height: 0.25, yOffset: -0.05, mesh: HEX_CYLINDER },
-    { id: 2, key: "rock",         label: "Rock",          color: new Color4(0.58, 0.55, 0.52, 1), height: 0.45, yOffset: 0.08,  mesh: HEX_CYLINDER },
+    { id: 2, key: "rock",         label: "Rock",          color: new Color4(0.58, 0.55, 0.52, 1), height: 0.45, yOffset: 0.08,  mesh: { kind: "gltf" as const, key: "rock-gltf", assetKey: "/assets/terrain/rock.glb", meshName: "", scale: 1, rotationY: 0 } },
     { id: 3, key: "shallowWater", label: "Shallow Water", color: new Color4(0.47, 0.70, 0.82, 1), height: 0.20, yOffset: -0.15, mesh: HEX_CYLINDER },
     { id: 4, key: "forest",       label: "Forest",        color: new Color4(0.22, 0.50, 0.22, 1), height: 0.35, yOffset: 0.02,  mesh: HEX_CYLINDER },
     { id: 5, key: "deepWater",    label: "Deep Water",    color: new Color4(0.22, 0.42, 0.68, 1), height: 0.15, yOffset: -0.25, mesh: HEX_CYLINDER },

@@ -13,9 +13,10 @@ import {
   SceneLoader,
   type StandardMaterial,
 } from "@babylonjs/core";
-import type { MeshDescriptor } from "./tile-registry.ts";
+import type { GltfMeshDescriptor, MeshDescriptor } from "./tile-registry.ts";
 
 const gltfCache = new Map<string, Mesh>();
+const gltfFallbackWarned = new Set<string>();
 
 function buildPrimitive(
   md: Extract<MeshDescriptor, { kind: "primitive" }>,
@@ -59,12 +60,29 @@ async function loadGltf(
   return source.clone(`src-${md.key}`)!;
 }
 
+function buildFallbackPrimitive(
+  md: GltfMeshDescriptor,
+  scene: Scene,
+  material: StandardMaterial,
+): Mesh {
+  const mesh = MeshBuilder.CreateCylinder(
+    `src-${md.key}-fallback`,
+    { tessellation: 6, diameter: 1.73, height: 1 },
+    scene,
+  );
+  mesh.material = material;
+  mesh.rotation.y = Math.PI / 6;
+  mesh.hasVertexAlpha = true;
+  return mesh;
+}
+
 /**
  * Resolve a MeshDescriptor into a ready-to-use source Mesh.
  *
  * Primitive descriptors are created synchronously (wrapped in a resolved
  * promise for API uniformity). glTF descriptors trigger an async load
- * with caching by assetKey.
+ * with caching by assetKey. If a glTF load fails (e.g. asset not yet
+ * deployed), a placeholder hex-cylinder is returned instead.
  */
 export async function loadMeshDescriptor(
   scene: Scene,
@@ -75,7 +93,17 @@ export async function loadMeshDescriptor(
     case "primitive":
       return buildPrimitive(descriptor, scene, material);
     case "gltf":
-      return loadGltf(descriptor, scene, material);
+      try {
+        return await loadGltf(descriptor, scene, material);
+      } catch {
+        if (!gltfFallbackWarned.has(descriptor.assetKey)) {
+          console.warn(
+            `AssetLoader: failed to load "${descriptor.assetKey}", using primitive fallback`,
+          );
+          gltfFallbackWarned.add(descriptor.assetKey);
+        }
+        return buildFallbackPrimitive(descriptor, scene, material);
+      }
   }
 }
 
