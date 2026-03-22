@@ -79,25 +79,29 @@ const TERRAIN_COUNT: usize = 5;
 
 /// Base weights control global terrain distribution independent of neighbours.
 /// Higher values make a terrain appear more often across the whole island.
-///   grass=6, sand=4, rock=3, water=2, forest=5
-const BASE_WEIGHTS: [u32; TERRAIN_COUNT] = [6, 4, 3, 2, 5];
+///   grass=5, sand=5, rock=3, water=6, forest=4
+const BASE_WEIGHTS: [u32; TERRAIN_COUNT] = [5, 5, 3, 6, 4];
 
 /// Adjacency weight table: `ADJ_WEIGHTS[from][to]` is the integer weight
 /// for terrain `to` appearing next to terrain `from`. Zero means forbidden.
 /// VOID is never a WFC candidate — it only appears on contradiction.
 ///
-/// grass(0)  — prefers grass, sand, forest; avoids water
-/// sand(1)   — bridges grass and water; low forest affinity
-/// rock(2)   — prefers rock, grass, forest; avoids water
-/// water(3)  — prefers water, sand; avoids grass, rock, forest
-/// forest(4) — prefers forest, grass, rock; low sand; avoids water
+/// grass(0)  — prefers grass, sand, forest; strongly avoids water
+/// sand(1)   — bridges land and water equally
+/// rock(2)   — prefers rock, grass, forest; strongly avoids water
+/// water(3)  — strongly prefers water, sand; strongly avoids grass, rock, forest
+/// forest(4) — prefers forest, grass, rock; low sand; strongly avoids water
+///
+/// Note: "strongly avoids" uses weight=1 (not 0) so WFC propagation does
+/// not eliminate the candidate entirely — selection weights still make
+/// the pairing extremely rare while allowing water to survive on the grid.
 const ADJ_WEIGHTS: [[u32; TERRAIN_COUNT]; TERRAIN_COUNT] = [
     // to:  grass  sand  rock  water  forest
-    [  10,    6,    4,    0,    8 ],  // from grass
-    [   6,    8,    3,    5,    2 ],  // from sand
-    [   4,    3,   10,    0,    6 ],  // from rock
-    [   0,    5,    0,   10,    0 ],  // from water
-    [   8,    2,    6,    0,   10 ],  // from forest
+    [  10,    8,    4,    1,    8 ],  // from grass
+    [   5,    6,    3,   10,    3 ],  // from sand
+    [   4,    3,   10,    1,    6 ],  // from rock
+    [   1,   10,    1,   14,    1 ],  // from water
+    [   8,    3,    6,    1,   10 ],  // from forest
 ];
 
 // ---------------------------------------------------------------------------
@@ -499,5 +503,13 @@ mod tests {
                 "terrain {t} never appeared across {runs} seeds",
             );
         }
+
+        // Water (terrain 3) specifically: should appear in at least 5% of
+        // total tiles across all runs (0.05 * 37 * 20 = 37)
+        assert!(
+            totals[TERRAIN_WATER as usize] >= 10,
+            "water total {} is too low across {runs} seeds — balance issue",
+            totals[TERRAIN_WATER as usize],
+        );
     }
 }
