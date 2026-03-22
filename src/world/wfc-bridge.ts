@@ -17,6 +17,8 @@ export interface GenerateResult {
   generator: GeneratorProviderKind;
   radius: number;
   tileCount: number;
+  voidCount: number;
+  terrainCounts: number[];
   tiles: TileData[];
 }
 
@@ -84,11 +86,23 @@ const tsFallbackProvider: GeneratorProvider = {
       terrain: terrainFromSeed(seedHi, seedLo, index),
     }));
 
+    const terrainCounts = [0, 0, 0, 0];
+    let voidCount = 0;
+    for (const t of tiles) {
+      if (t.terrain === 4) {
+        voidCount++;
+      } else {
+        terrainCounts[t.terrain]++;
+      }
+    }
+
     return {
       seedHex: seedToHex(seedHi, seedLo),
       generator: "ts-fallback",
       radius,
       tileCount: tiles.length,
+      voidCount,
+      terrainCounts,
       tiles,
     };
   },
@@ -104,6 +118,8 @@ interface WasmGenerateJson {
   generator: string;
   radius: number;
   tile_count: number;
+  void_count: number;
+  terrain_counts: number[];
   tiles: Array<{ q: number; r: number; terrain: number }>;
 }
 
@@ -126,6 +142,8 @@ function createWasmProvider(wasmModule: {
         generator: "wasm",
         radius: json.radius,
         tileCount: tiles.length,
+        voidCount: json.void_count,
+        terrainCounts: json.terrain_counts,
         tiles,
       };
     },

@@ -317,6 +317,8 @@ struct WfcResult {
     generator: String,
     radius: u32,
     tile_count: usize,
+    void_count: usize,
+    terrain_counts: [usize; TERRAIN_COUNT],
     tiles: Vec<WfcTile>,
 }
 
@@ -351,11 +353,23 @@ pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32) -> String {
         .map(|(&(q, r), &terrain)| WfcTile { q, r, terrain })
         .collect();
 
+    let mut terrain_counts = [0_usize; TERRAIN_COUNT];
+    let mut void_count: usize = 0;
+    for &t in &terrains {
+        if t == TERRAIN_VOID {
+            void_count += 1;
+        } else {
+            terrain_counts[t as usize] += 1;
+        }
+    }
+
     serde_json::to_string(&WfcResult {
         seed_hex: format!("{seed_hi:08x}{seed_lo:08x}"),
         generator: "wasm".to_owned(),
         radius,
         tile_count: tiles.len(),
+        void_count,
+        terrain_counts,
         tiles,
     })
     .expect("WFC result should serialize")

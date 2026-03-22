@@ -33,6 +33,8 @@ interface RuntimeState {
   seedHex: string;
   generator: "wasm" | "ts-fallback";
   tileCount: number;
+  voidCount: number;
+  terrainCounts: number[];
   tiles: Array<{ q: number; r: number; terrain: number }>;
 }
 
@@ -61,6 +63,7 @@ app.innerHTML = `
         <span id="mesh-pill" class="pill">meshes: --</span>
         <span id="seed-pill" class="pill pill--dim">seed: --</span>
         <span id="gen-pill" class="pill pill--dim">gen: --</span>
+        <span id="void-pill" class="pill pill--dim" style="display:none">void: 0</span>
       </div>
     </div>
     <p id="status-line" class="status-line">Preparing engine bootstrap...</p>
@@ -73,6 +76,7 @@ const fpsPill = mustQuerySelector<HTMLSpanElement>("#fps-pill");
 const meshPill = mustQuerySelector<HTMLSpanElement>("#mesh-pill");
 const seedPill = mustQuerySelector<HTMLSpanElement>("#seed-pill");
 const genPill = mustQuerySelector<HTMLSpanElement>("#gen-pill");
+const voidPill = mustQuerySelector<HTMLSpanElement>("#void-pill");
 const statusLine = mustQuerySelector<HTMLParagraphElement>("#status-line");
 
 const state: RuntimeState = {
@@ -84,6 +88,8 @@ const state: RuntimeState = {
   seedHex: "",
   generator: "ts-fallback",
   tileCount: 0,
+  voidCount: 0,
+  terrainCounts: [0, 0, 0, 0],
   tiles: [],
 };
 
@@ -129,6 +135,8 @@ function renderGameToText() {
     seedHex: state.seedHex,
     generator: state.generator,
     tileCount: state.tileCount,
+    voidCount: state.voidCount,
+    terrainCounts: state.terrainCounts,
     tiles: state.tiles,
   });
 }
@@ -195,12 +203,24 @@ async function bootstrap() {
     state.seedHex = preview.seedHex;
     state.generator = preview.generator;
     state.tileCount = preview.tileCount;
+    state.voidCount = preview.voidCount;
+    state.terrainCounts = preview.terrainCounts;
     state.tiles = preview.tiles;
 
     seedPill.textContent = `seed: ${preview.seedHex}`;
     genPill.textContent = `gen: ${preview.generator}`;
-    statusLine.textContent =
-      `Preview: seed ${preview.seedHex} (${preview.generator}) — ${preview.tileCount} tiles. Drag to orbit, scroll to zoom.`;
+
+    if (preview.voidCount > 0) {
+      voidPill.textContent = `void: ${preview.voidCount}`;
+      voidPill.style.display = "";
+      voidPill.style.color = "#d32f2f";
+      statusLine.textContent =
+        `Warning: ${preview.voidCount} void tile(s) — WFC contradiction detected. seed ${preview.seedHex}`;
+    } else {
+      voidPill.style.display = "none";
+      statusLine.textContent =
+        `Preview: seed ${preview.seedHex} (${preview.generator}) — ${preview.tileCount} tiles. Drag to orbit, scroll to zoom.`;
+    }
   }
 
   rebuildPreview();
