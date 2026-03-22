@@ -9,9 +9,9 @@ import type { TileData } from "./wfc-bridge.ts";
 import { axialToWorld } from "./hex-grid.ts";
 import { loadMeshDescriptor } from "./asset-loader.ts";
 import {
-  lookupTile,
+  lookupPrototype,
   type MeshDescriptor,
-  type TileDescriptor,
+  type PrototypeDescriptor,
 } from "./tile-registry.ts";
 
 export interface IslandHandle {
@@ -20,7 +20,7 @@ export interface IslandHandle {
 
 interface TileEntry {
   tile: TileData;
-  desc: TileDescriptor;
+  desc: PrototypeDescriptor;
 }
 
 export async function renderIsland(
@@ -35,7 +35,7 @@ export async function renderIsland(
   const groups = new Map<string, { md: MeshDescriptor; entries: TileEntry[] }>();
 
   for (const tile of tiles) {
-    const desc = lookupTile(tile.terrain);
+    const desc = lookupPrototype(tile.prototypeId, tile.terrain);
     const meshKey = desc.mesh.key;
     let group = groups.get(meshKey);
     if (!group) {
