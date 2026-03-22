@@ -37,3 +37,25 @@ export function seedFromHash(): SeedPair {
   const parsed = parseSeedHex(location.hash);
   return parsed ?? { hi: DEFAULT_SEED_HI, lo: DEFAULT_SEED_LO };
 }
+
+// ---------------------------------------------------------------------------
+// Radius from URL query parameter
+// ---------------------------------------------------------------------------
+
+const DEFAULT_RADIUS = 2;
+const MIN_RADIUS = 0;
+const MAX_RADIUS = 3;
+
+/**
+ * Read `?radius=N` from the URL search params.
+ * Clamps to [0, 3], defaults to 2.
+ */
+export function radiusFromQuery(): number {
+  if (typeof location === "undefined") return DEFAULT_RADIUS;
+  const params = new URLSearchParams(location.search);
+  const raw = params.get("radius");
+  if (raw === null) return DEFAULT_RADIUS;
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n)) return DEFAULT_RADIUS;
+  return Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, n));
+}

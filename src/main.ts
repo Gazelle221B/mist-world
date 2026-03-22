@@ -14,7 +14,7 @@ import {
 import "@babylonjs/loaders/glTF";
 import { generateIsland, initBridge } from "./world/wfc-bridge.ts";
 import { type IslandHandle, renderIsland } from "./world/island-renderer.ts";
-import { seedFromHash } from "./world/seed.ts";
+import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
 
 declare global {
   interface Window {
@@ -32,6 +32,7 @@ interface RuntimeState {
   cameraRadius: number;
   seedHex: string;
   generator: "wasm" | "ts-fallback";
+  radius: number;
   tileCount: number;
   voidCount: number;
   terrainCounts: number[];
@@ -63,6 +64,7 @@ app.innerHTML = `
         <span id="mesh-pill" class="pill">meshes: --</span>
         <span id="seed-pill" class="pill pill--dim">seed: --</span>
         <span id="gen-pill" class="pill pill--dim">gen: --</span>
+        <span id="radius-pill" class="pill pill--dim">r: --</span>
         <span id="void-pill" class="pill pill--dim" style="display:none">void: 0</span>
       </div>
     </div>
@@ -76,6 +78,7 @@ const fpsPill = mustQuerySelector<HTMLSpanElement>("#fps-pill");
 const meshPill = mustQuerySelector<HTMLSpanElement>("#mesh-pill");
 const seedPill = mustQuerySelector<HTMLSpanElement>("#seed-pill");
 const genPill = mustQuerySelector<HTMLSpanElement>("#gen-pill");
+const radiusPill = mustQuerySelector<HTMLSpanElement>("#radius-pill");
 const voidPill = mustQuerySelector<HTMLSpanElement>("#void-pill");
 const statusLine = mustQuerySelector<HTMLParagraphElement>("#status-line");
 
@@ -87,6 +90,7 @@ const state: RuntimeState = {
   cameraRadius: 0,
   seedHex: "",
   generator: "ts-fallback",
+  radius: 2,
   tileCount: 0,
   voidCount: 0,
   terrainCounts: [0, 0, 0, 0],
@@ -134,6 +138,7 @@ function renderGameToText() {
     cameraRadius: Number(state.cameraRadius.toFixed(2)),
     seedHex: state.seedHex,
     generator: state.generator,
+    radius: state.radius,
     tileCount: state.tileCount,
     voidCount: state.voidCount,
     terrainCounts: state.terrainCounts,
@@ -188,9 +193,10 @@ async function bootstrap() {
 
   function rebuildPreview() {
     const seed = seedFromHash();
-    const preview = generateIsland(seed.hi, seed.lo);
+    const radius = radiusFromQuery();
+    const preview = generateIsland(seed.hi, seed.lo, radius);
 
-    if (preview.seedHex === state.seedHex) return;
+    if (preview.seedHex === state.seedHex && radius === state.radius) return;
 
     if (currentIsland) {
       currentIsland.mesh.dispose();
@@ -202,6 +208,7 @@ async function bootstrap() {
 
     state.seedHex = preview.seedHex;
     state.generator = preview.generator;
+    state.radius = radius;
     state.tileCount = preview.tileCount;
     state.voidCount = preview.voidCount;
     state.terrainCounts = preview.terrainCounts;
@@ -209,6 +216,7 @@ async function bootstrap() {
 
     seedPill.textContent = `seed: ${preview.seedHex}`;
     genPill.textContent = `gen: ${preview.generator}`;
+    radiusPill.textContent = `r: ${radius}`;
 
     if (preview.voidCount > 0) {
       voidPill.textContent = `void: ${preview.voidCount}`;
