@@ -60,11 +60,24 @@ fn hex_spiral(radius: i32) -> Vec<(i32, i32)> {
 // Adjacency rules (integer-only)
 // ---------------------------------------------------------------------------
 
-/// Number of terrain types.
+/// Terrain IDs:
+///   0 = grass, 1 = sand, 2 = rock, 3 = water, 4 = VOID (contradiction)
+#[allow(dead_code)]
+const TERRAIN_GRASS: u8 = 0;
+#[allow(dead_code)]
+const TERRAIN_SAND: u8 = 1;
+#[allow(dead_code)]
+const TERRAIN_ROCK: u8 = 2;
+#[allow(dead_code)]
+const TERRAIN_WATER: u8 = 3;
+const TERRAIN_VOID: u8 = 4;
+
+/// Number of placeable terrain types (excludes VOID).
 const TERRAIN_COUNT: usize = 4;
 
 /// Adjacency weight table: `ADJ_WEIGHTS[from][to]` is the integer weight
 /// for terrain `to` appearing next to terrain `from`. Zero means forbidden.
+/// VOID is never a WFC candidate — it only appears on contradiction.
 ///
 /// grass(0) — prefers grass, sand; avoids water
 /// sand(1)  — bridges grass and water
@@ -160,10 +173,10 @@ fn wfc_collapse(coords: &[(i32, i32)], rng: &mut ChaCha8Rng) -> Vec<u8> {
         let pick_idx = (rng.next_u32() as usize) % min_candidates.len();
         let cell_idx = min_candidates[pick_idx];
 
-        // 2. Contradiction check: if no candidates remain, assign VOID (0).
+        // 2. Contradiction check: if no candidates remain, assign VOID.
         if cells[cell_idx].count == 0 {
             cells[cell_idx].collapsed = true;
-            cells[cell_idx].terrain = 0; // VOID fallback
+            cells[cell_idx].terrain = TERRAIN_VOID;
             collapsed_count += 1;
             continue;
         }
@@ -221,7 +234,7 @@ fn pick_terrain(
     // Weighted random selection (integer only)
     let total: u32 = weights.iter().sum();
     if total == 0 {
-        return 0; // contradiction fallback
+        return TERRAIN_VOID; // contradiction fallback
     }
 
     let mut roll = rng.next_u32() % total;
@@ -232,7 +245,7 @@ fn pick_terrain(
         roll -= w;
     }
 
-    0 // shouldn't reach here
+    TERRAIN_VOID // shouldn't reach here
 }
 
 /// Propagate constraints from a just-collapsed cell outward.
@@ -418,12 +431,16 @@ mod tests {
     }
 
     #[test]
-    fn no_floating_point_in_output() {
-        // Ensure output is valid JSON with only integer terrain values
+    fn terrain_values_in_range() {
+        // Terrain must be 0..=4 (0-3 = real terrains, 4 = VOID)
         let result = generate(0xdeadbeef, 0xcafe0001, 2);
         let parsed: WfcResult = serde_json::from_str(&result).unwrap();
         for tile in &parsed.tiles {
-            assert!(tile.terrain < TERRAIN_COUNT as u8);
+            assert!(
+                tile.terrain <= TERRAIN_VOID,
+                "terrain {} out of range at ({}, {})",
+                tile.terrain, tile.q, tile.r,
+            );
         }
     }
 }

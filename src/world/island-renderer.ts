@@ -20,6 +20,7 @@ const TERRAIN_COLORS: readonly Color4[] = [
   new Color4(0.87, 0.82, 0.60, 1), // 1: sand
   new Color4(0.58, 0.55, 0.52, 1), // 2: rock
   new Color4(0.39, 0.62, 0.78, 1), // 3: water
+  new Color4(0.85, 0.20, 0.30, 1), // 4: VOID (contradiction — bright red)
 ];
 
 export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {
@@ -43,7 +44,7 @@ export function renderIsland(scene: Scene, tiles: TileData[]): IslandHandle {
     const { x, z } = axialToWorld(tile.q, tile.r);
     matrices.push(Matrix.Translation(x, 0, z));
 
-    const color = TERRAIN_COLORS[tile.terrain] ?? TERRAIN_COLORS[0];
+    const color = TERRAIN_COLORS[tile.terrain] ?? TERRAIN_COLORS[4];
     colorData[i * 4 + 0] = color.r;
     colorData[i * 4 + 1] = color.g;
     colorData[i * 4 + 2] = color.b;
