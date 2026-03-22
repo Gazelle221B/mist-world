@@ -13,7 +13,7 @@ import {
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
 import { generatePreview, initBridge } from "./world/wfc-bridge.ts";
-import { renderIsland } from "./world/island-renderer.ts";
+import { type IslandHandle, renderIsland } from "./world/island-renderer.ts";
 import { seedFromHash } from "./world/seed.ts";
 
 declare global {
@@ -174,22 +174,37 @@ async function bootstrap() {
   const providerKind = await initBridge();
   console.log(`[mist-world] WFC provider: ${providerKind}`);
 
-  const seed = seedFromHash();
-  const preview = generatePreview(seed.hi, seed.lo);
-  renderIsland(scene, preview.tiles);
-
   state.renderer = renderer;
   state.sceneReady = true;
-  state.seedHex = preview.seedHex;
-  state.generator = preview.generator;
-  state.tileCount = preview.tileCount;
-  state.tiles = preview.tiles;
 
-  seedPill.textContent = `seed: ${preview.seedHex}`;
-  genPill.textContent = `gen: ${preview.generator}`;
+  let currentIsland: IslandHandle | null = null;
 
-  statusLine.textContent =
-    `Preview: seed ${preview.seedHex} (${preview.generator}) — ${preview.tileCount} tiles. Drag to orbit, scroll to zoom.`;
+  function rebuildPreview() {
+    const seed = seedFromHash();
+    const preview = generatePreview(seed.hi, seed.lo);
+
+    if (preview.seedHex === state.seedHex) return;
+
+    if (currentIsland) {
+      currentIsland.mesh.dispose();
+      currentIsland.material.dispose();
+      currentIsland = null;
+    }
+
+    currentIsland = renderIsland(scene, preview.tiles);
+
+    state.seedHex = preview.seedHex;
+    state.generator = preview.generator;
+    state.tileCount = preview.tileCount;
+    state.tiles = preview.tiles;
+
+    seedPill.textContent = `seed: ${preview.seedHex}`;
+    genPill.textContent = `gen: ${preview.generator}`;
+    statusLine.textContent =
+      `Preview: seed ${preview.seedHex} (${preview.generator}) — ${preview.tileCount} tiles. Drag to orbit, scroll to zoom.`;
+  }
+
+  rebuildPreview();
 
   const step = () => {
     state.meshCount = scene.meshes.length;
@@ -204,6 +219,10 @@ async function bootstrap() {
   });
 
   window.render_game_to_text = renderGameToText;
+
+  window.addEventListener("hashchange", () => {
+    rebuildPreview();
+  });
 
   window.addEventListener("keydown", async (event) => {
     if (event.key.toLowerCase() === "f") {
