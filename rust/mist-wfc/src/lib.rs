@@ -61,7 +61,8 @@ fn hex_spiral(radius: i32) -> Vec<(i32, i32)> {
 // ---------------------------------------------------------------------------
 
 /// Terrain IDs:
-///   0 = grass, 1 = sand, 2 = rock, 3 = water, 4 = forest, 5 = VOID
+///   0 = grass, 1 = sand, 2 = rock, 3 = water, 4 = forest
+///   255 = VOID (sentinel — contradiction marker, never changes)
 #[allow(dead_code)]
 const TERRAIN_GRASS: u8 = 0;
 #[allow(dead_code)]
@@ -72,7 +73,7 @@ const TERRAIN_ROCK: u8 = 2;
 const TERRAIN_WATER: u8 = 3;
 #[allow(dead_code)]
 const TERRAIN_FOREST: u8 = 4;
-const TERRAIN_VOID: u8 = 5;
+const TERRAIN_VOID: u8 = 255;
 
 /// Number of placeable terrain types (excludes VOID).
 const TERRAIN_COUNT: usize = 5;
@@ -459,12 +460,12 @@ mod tests {
 
     #[test]
     fn terrain_values_in_range() {
-        // Terrain must be 0..=4 (0-3 = real terrains, 4 = VOID)
+        // Terrain must be 0..TERRAIN_COUNT (placeable) or TERRAIN_VOID (255)
         let result = generate(0xdeadbeef, 0xcafe0001, 2);
         let parsed: WfcResult = serde_json::from_str(&result).unwrap();
         for tile in &parsed.tiles {
             assert!(
-                tile.terrain <= TERRAIN_VOID,
+                (tile.terrain as usize) < TERRAIN_COUNT || tile.terrain == TERRAIN_VOID,
                 "terrain {} out of range at ({}, {})",
                 tile.terrain, tile.q, tile.r,
             );

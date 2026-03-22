@@ -89,7 +89,7 @@ const tsFallbackProvider: GeneratorProvider = {
     const terrainCounts = [0, 0, 0, 0, 0];
     let voidCount = 0;
     for (const t of tiles) {
-      if (t.terrain === 5) {
+      if (t.terrain === 255) {
         voidCount++;
       } else {
         terrainCounts[t.terrain]++;
