@@ -3,6 +3,17 @@
 
 export function engine_version(): string;
 
+/**
+ * Generate a hex island using integer WFC.
+ *
+ * `radius` controls how many hex rings to generate:
+ *   0 → 1 tile, 1 → 7 tiles, 2 → 19 tiles, 3 → 37 tiles, etc.
+ */
+export function generate(seed_hi: number, seed_lo: number, radius: number): string;
+
+/**
+ * Legacy preview — kept for backwards compatibility.
+ */
 export function generate_preview(seed_hi: number, seed_lo: number): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -10,6 +21,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly engine_version: () => [number, number];
+    readonly generate: (a: number, b: number, c: number) => [number, number];
     readonly generate_preview: (a: number, b: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

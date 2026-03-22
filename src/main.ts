@@ -12,7 +12,7 @@ import {
   WebGPUEngine,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
-import { generatePreview, initBridge } from "./world/wfc-bridge.ts";
+import { generateIsland, initBridge } from "./world/wfc-bridge.ts";
 import { type IslandHandle, renderIsland } from "./world/island-renderer.ts";
 import { seedFromHash } from "./world/seed.ts";
 
@@ -180,7 +180,7 @@ async function bootstrap() {
 
   function rebuildPreview() {
     const seed = seedFromHash();
-    const preview = generatePreview(seed.hi, seed.lo);
+    const preview = generateIsland(seed.hi, seed.lo);
 
     if (preview.seedHex === state.seedHex) return;
 

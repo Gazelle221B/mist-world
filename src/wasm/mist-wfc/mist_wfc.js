@@ -17,6 +17,30 @@ export function engine_version() {
 }
 
 /**
+ * Generate a hex island using integer WFC.
+ *
+ * `radius` controls how many hex rings to generate:
+ *   0 → 1 tile, 1 → 7 tiles, 2 → 19 tiles, 3 → 37 tiles, etc.
+ * @param {number} seed_hi
+ * @param {number} seed_lo
+ * @param {number} radius
+ * @returns {string}
+ */
+export function generate(seed_hi, seed_lo, radius) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.generate(seed_hi, seed_lo, radius);
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Legacy preview — kept for backwards compatibility.
  * @param {number} seed_hi
  * @param {number} seed_lo
  * @returns {string}
