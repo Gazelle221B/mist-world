@@ -43,13 +43,34 @@ async function loadGltf(
   if (cached && !cached.isDisposed()) return cached.clone(`src-${md.key}`)!;
 
   const result = await SceneLoader.ImportMeshAsync(
-    md.meshName,
+    "",
     "",
     md.assetKey,
     scene,
   );
 
-  const source = result.meshes[0] as Mesh;
+  // Resolve the target mesh: match by meshName, skip __root__, or take first
+  let source: Mesh | undefined;
+  const available: string[] = [];
+  for (const m of result.meshes) {
+    available.push(m.name);
+    if (md.meshName && m.name === md.meshName) {
+      source = m as Mesh;
+    }
+  }
+
+  if (!source) {
+    // Skip __root__ node that Babylon creates for glTF imports
+    source = (result.meshes.find((m) => m.name !== "__root__") ??
+      result.meshes[0]) as Mesh;
+    if (md.meshName) {
+      console.warn(
+        `AssetLoader: meshName "${md.meshName}" not found in "${md.assetKey}". ` +
+          `Available: [${available.join(", ")}]. Using "${source.name}" instead.`,
+      );
+    }
+  }
+
   source.scaling.setAll(md.scale);
   source.rotation.y = md.rotationY;
   source.material = material;
