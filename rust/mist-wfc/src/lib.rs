@@ -61,7 +61,8 @@ fn hex_spiral(radius: i32) -> Vec<(i32, i32)> {
 // ---------------------------------------------------------------------------
 
 /// Terrain IDs:
-///   0 = grass, 1 = sand, 2 = rock, 3 = water, 4 = forest
+///   0 = grass, 1 = sand, 2 = rock, 3 = shallow water, 4 = forest,
+///   5 = deep water
 ///   255 = VOID (sentinel — contradiction marker, never changes)
 #[allow(dead_code)]
 const TERRAIN_GRASS: u8 = 0;
@@ -70,39 +71,42 @@ const TERRAIN_SAND: u8 = 1;
 #[allow(dead_code)]
 const TERRAIN_ROCK: u8 = 2;
 #[allow(dead_code)]
-const TERRAIN_WATER: u8 = 3;
+const TERRAIN_SHALLOW: u8 = 3;
 #[allow(dead_code)]
 const TERRAIN_FOREST: u8 = 4;
+#[allow(dead_code)]
+const TERRAIN_DEEP: u8 = 5;
 const TERRAIN_VOID: u8 = 255;
 
 /// Number of placeable terrain types (excludes VOID).
-const TERRAIN_COUNT: usize = 5;
+const TERRAIN_COUNT: usize = 6;
 
 /// Base weights control global terrain distribution independent of neighbours.
-/// Higher values make a terrain appear more often across the whole island.
-///   grass=5, sand=5, rock=3, water=6, forest=4
-const BASE_WEIGHTS: [u32; TERRAIN_COUNT] = [5, 5, 3, 6, 4];
+///   grass=5, sand=5, rock=3, shallow=4, forest=4, deep=3
+const BASE_WEIGHTS: [u32; TERRAIN_COUNT] = [5, 5, 3, 4, 4, 3];
 
-/// Adjacency weight table: `ADJ_WEIGHTS[from][to]` is the integer weight
-/// for terrain `to` appearing next to terrain `from`. Zero means forbidden.
+/// Adjacency weight table: `ADJ_WEIGHTS[from][to]` is the integer weight.
 /// VOID is never a WFC candidate — it only appears on contradiction.
 ///
-/// grass(0)  — prefers grass, sand, forest; strongly avoids water
-/// sand(1)   — bridges land and water equally
-/// rock(2)   — prefers rock, grass, forest; strongly avoids water
-/// water(3)  — strongly prefers water, sand; strongly avoids grass, rock, forest
-/// forest(4) — prefers forest, grass, rock; low sand; strongly avoids water
+/// grass(0)   — prefers grass, sand, forest; avoids shallow water
+/// sand(1)    — bridges land and shallow water
+/// rock(2)    — prefers rock, grass, forest; avoids shallow water
+/// shallow(3) — prefers shallow, deep, sand; avoids land
+/// forest(4)  — prefers forest, grass, rock; avoids shallow water
+/// deep(5)    — ONLY adjacent to deep/shallow (hard rule, weight=0 for all else)
 ///
-/// Note: "strongly avoids" uses weight=1 (not 0) so WFC propagation does
-/// not eliminate the candidate entirely — selection weights still make
-/// the pairing extremely rare while allowing water to survive on the grid.
+/// Shallow water uses weight=1 ("strongly avoids") for land adjacency so
+/// propagation keeps it alive. Deep water uses weight=0 for non-water
+/// adjacency — propagation correctly eliminates it near land, and shallow
+/// water acts as the buffer between land and deep water.
 const ADJ_WEIGHTS: [[u32; TERRAIN_COUNT]; TERRAIN_COUNT] = [
-    // to:  grass  sand  rock  water  forest
-    [  10,    8,    4,    1,    8 ],  // from grass
-    [   5,    6,    3,   10,    3 ],  // from sand
-    [   4,    3,   10,    1,    6 ],  // from rock
-    [   1,   10,    1,   14,    1 ],  // from water
-    [   8,    3,    6,    1,   10 ],  // from forest
+    // to:  grass  sand  rock  shlw  forest  deep
+    [  10,    8,    4,    1,    8,    0 ],  // from grass
+    [   5,    6,    3,   10,    3,    0 ],  // from sand
+    [   4,    3,   10,    1,    6,    0 ],  // from rock
+    [   1,   10,    1,   10,    1,   12 ],  // from shallow
+    [   8,    3,    6,    1,   10,    0 ],  // from forest
+    [   0,    0,    0,   12,    0,   14 ],  // from deep
 ];
 
 // ---------------------------------------------------------------------------
@@ -505,12 +509,50 @@ mod tests {
             );
         }
 
-        // Water (terrain 3) specifically: should appear in at least 5% of
-        // total tiles across all runs (0.05 * 37 * 20 = 37)
+        // Water (shallow + deep) should appear meaningfully across runs
+        let water_total = totals[TERRAIN_SHALLOW as usize] + totals[TERRAIN_DEEP as usize];
         assert!(
-            totals[TERRAIN_WATER as usize] >= 10,
-            "water total {} is too low across {runs} seeds — balance issue",
-            totals[TERRAIN_WATER as usize],
+            water_total >= 10,
+            "water total (shallow {} + deep {}) is too low across {runs} seeds",
+            totals[TERRAIN_SHALLOW as usize],
+            totals[TERRAIN_DEEP as usize],
         );
+    }
+
+    #[test]
+    fn deep_water_only_adjacent_to_water() {
+        // Deep water (terrain 5) must never be directly adjacent to
+        // grass, sand, rock, or forest. Only shallow/deep neighbours allowed.
+        let coords = hex_spiral(3);
+        let coord_to_idx: BTreeMap<(i32, i32), usize> = coords
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (c, i))
+            .collect();
+
+        for i in 0..50_u32 {
+            let result = generate(0x30000000 + i, 0x40000000 + i, 3);
+            let parsed: WfcResult = serde_json::from_str(&result).unwrap();
+
+            for tile in &parsed.tiles {
+                if tile.terrain != TERRAIN_DEEP {
+                    continue;
+                }
+                for &(dq, dr) in &HEX_DIRS {
+                    let nq = tile.q + dq;
+                    let nr = tile.r + dr;
+                    if let Some(&ni) = coord_to_idx.get(&(nq, nr)) {
+                        let neighbour = &parsed.tiles[ni];
+                        assert!(
+                            neighbour.terrain == TERRAIN_SHALLOW
+                                || neighbour.terrain == TERRAIN_DEEP,
+                            "deep water at ({},{}) adjacent to terrain {} at ({},{}) in seed {i}",
+                            tile.q, tile.r,
+                            neighbour.terrain, nq, nr,
+                        );
+                    }
+                }
+            }
+        }
     }
 }

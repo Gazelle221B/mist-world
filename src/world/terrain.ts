@@ -10,17 +10,18 @@ export interface TerrainMeta {
   readonly color: Color4;
 }
 
-/** Terrain definitions indexed by terrain ID (0..4 = placeable). */
+/** Terrain definitions indexed by terrain ID (0..5 = placeable). */
 export const TERRAINS: readonly TerrainMeta[] = [
-  { id: 0, label: "grass",  color: new Color4(0.56, 0.74, 0.34, 1) },
-  { id: 1, label: "sand",   color: new Color4(0.87, 0.82, 0.60, 1) },
-  { id: 2, label: "rock",   color: new Color4(0.58, 0.55, 0.52, 1) },
-  { id: 3, label: "water",  color: new Color4(0.39, 0.62, 0.78, 1) },
-  { id: 4, label: "forest", color: new Color4(0.22, 0.50, 0.22, 1) },
+  { id: 0, label: "grass",        color: new Color4(0.56, 0.74, 0.34, 1) },
+  { id: 1, label: "sand",         color: new Color4(0.87, 0.82, 0.60, 1) },
+  { id: 2, label: "rock",         color: new Color4(0.58, 0.55, 0.52, 1) },
+  { id: 3, label: "shallowWater", color: new Color4(0.47, 0.70, 0.82, 1) },
+  { id: 4, label: "forest",       color: new Color4(0.22, 0.50, 0.22, 1) },
+  { id: 5, label: "deepWater",    color: new Color4(0.22, 0.42, 0.68, 1) },
 ];
 
 /** Number of placeable terrain types (excludes VOID). */
-export const TERRAIN_COUNT = 5;
+export const TERRAIN_COUNT = 6;
 
 /** VOID terrain ID — sentinel value, never changes when adding terrains. */
 export const TERRAIN_VOID_ID = 255;

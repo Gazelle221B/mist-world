@@ -67,7 +67,7 @@ function hexSpiral(radius: number): Array<[number, number]> {
 // ---------------------------------------------------------------------------
 
 function terrainFromSeed(seedHi: number, seedLo: number, index: number): number {
-  return (((seedHi ^ seedLo) * 2654435761 + index * 2246822519) >>> 0) % 5;
+  return (((seedHi ^ seedLo) * 2654435761 + index * 2246822519) >>> 0) % 6;
 }
 
 function seedToHex(seedHi: number, seedLo: number): string {
@@ -86,7 +86,7 @@ const tsFallbackProvider: GeneratorProvider = {
       terrain: terrainFromSeed(seedHi, seedLo, index),
     }));
 
-    const terrainCounts = [0, 0, 0, 0, 0];
+    const terrainCounts = [0, 0, 0, 0, 0, 0];
     let voidCount = 0;
     for (const t of tiles) {
       if (t.terrain === 255) {
