@@ -16,7 +16,7 @@ import { initBridge } from "./world/wfc-bridge.ts";
 import {
   type IslandHandle,
   type PlaceholderHandle,
-  renderIsland,
+  renderWorld,
   renderPlaceholders,
 } from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
@@ -158,7 +158,7 @@ function renderGameToText() {
     radius: state.radius,
     regionCount: state.regionCount,
     frontierCount: state.frontierCount,
-    totalTileCount: state.totalTileCount,
+    globalTileCount: state.totalTileCount,
     voidCount: state.voidCount,
     boundaryFixCount: state.boundaryFixCount,
     terrainCounts: state.terrainCounts,
@@ -219,55 +219,36 @@ async function bootstrap() {
   const world = new HexWorld(radius, seed.hi, seed.lo);
   world.init();
 
-  // Track rendered regions and placeholders
-  const regionHandles = new Map<string, IslandHandle>();
+  // Track world rendering and placeholders
+  let worldHandle: IslandHandle | null = null;
   let placeholderHandle: PlaceholderHandle | null = null;
 
-  function rkey(q: number, r: number): string {
-    return `${q},${r}`;
-  }
-
-  /** Aggregate terrain stats from all populated regions. */
+  /** Aggregate terrain stats from globalTiles. */
   function updateWorldStats() {
+    const tiles = world.allTiles();
     const counts = [0, 0, 0, 0, 0, 0];
-    let total = 0;
-    let voids = 0;
 
-    for (const region of world.populatedRegions()) {
-      if (!region.tiles) continue;
-      for (const tile of region.tiles) {
-        total++;
-        if (tile.terrain === 255) {
-          voids++;
-        } else {
-          counts[tile.terrain]++;
-        }
-      }
+    for (const tile of tiles) {
+      counts[tile.terrain]++;
     }
 
     state.regionCount = world.populatedCount();
     state.frontierCount = world.placeholders().length;
-    state.totalTileCount = total;
-    state.voidCount = voids;
+    state.totalTileCount = world.globalTileCount();
+    state.voidCount = world.totalVoidCount();
     state.boundaryFixCount = world.totalBoundaryFixes();
     state.terrainCounts = counts;
   }
 
-  /** Render all populated regions that haven't been rendered yet. */
-  async function renderNewRegions(animate: boolean = false) {
-    for (const region of world.populatedRegions()) {
-      const key = rkey(region.macroQ, region.macroR);
-      if (regionHandles.has(key) || !region.tiles) continue;
-
-      const handle = await renderIsland(
-        scene,
-        region.tiles,
-        region.macroQ,
-        region.macroR,
-        world.spacing,
-        animate,
-      );
-      regionHandles.set(key, handle);
+  /** Re-render the entire world from globalTiles. */
+  async function renderWorldTiles() {
+    if (worldHandle) {
+      worldHandle.dispose();
+      worldHandle = null;
+    }
+    const tiles = world.allTiles();
+    if (tiles.length > 0) {
+      worldHandle = await renderWorld(scene, tiles);
     }
   }
 
@@ -286,14 +267,16 @@ async function bootstrap() {
 
   /** Full rebuild: dispose all, regenerate from world state. */
   async function fullRebuild() {
-    for (const handle of regionHandles.values()) handle.dispose();
-    regionHandles.clear();
+    if (worldHandle) {
+      worldHandle.dispose();
+      worldHandle = null;
+    }
     if (placeholderHandle) {
       placeholderHandle.dispose();
       placeholderHandle = null;
     }
 
-    await renderNewRegions();
+    await renderWorldTiles();
     rebuildPlaceholders();
     updateWorldStats();
     updateStatusLine();
@@ -335,7 +318,7 @@ async function bootstrap() {
       return;
     }
 
-    await renderNewRegions(true);
+    await renderWorldTiles();
     rebuildPlaceholders();
     updateWorldStats();
     updateStatusLine();
