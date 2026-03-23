@@ -268,9 +268,10 @@ async function bootstrap() {
 
       if (hex === state.seedHex && newRadius === state.radius) return;
 
+      await renderIsland(newSeed.hi, newSeed.lo, newRadius);
       state.seedHex = hex;
       state.radius = newRadius;
-      await renderIsland(newSeed.hi, newSeed.lo, newRadius);
+      updateStatusLine();
     } catch (error) {
       console.error(error);
       statusLine.textContent = "Island redraw failed. Check the console for details.";
