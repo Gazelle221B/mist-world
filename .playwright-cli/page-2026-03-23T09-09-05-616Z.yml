@@ -1,0 +1,15 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - paragraph [ref=e5]: Mist World / Sprint 0
+    - heading "Babylon + WASM bootstrap" [level=1] [ref=e6]
+    - paragraph [ref=e7]: Expandable hex-world visual slice.
+  - generic [ref=e8]:
+    - generic "Mist World viewport" [ref=e9]
+    - generic [ref=e10]:
+      - generic [ref=e11]: "renderer: booting"
+      - generic [ref=e12]: "fps: --"
+      - generic [ref=e13]: "meshes: --"
+      - generic [ref=e14]: "seed: --"
+      - generic [ref=e15]: "gen: --"
+      - generic [ref=e16]: "r: --"
+  - paragraph [ref=e17]: Preparing engine bootstrap...
