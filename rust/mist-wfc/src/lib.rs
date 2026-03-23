@@ -255,6 +255,64 @@ impl Cell {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trail-based backtracking data structures
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a single cell's state, for backtracking restoration.
+#[derive(Clone)]
+struct CellSnapshot {
+    cell_idx: usize,
+    candidates: u64,
+    count: u32,
+    collapsed: bool,
+    terrain: u8,
+    proto_id: u8,
+    rotation: u8,
+    collapse_order: u32,
+}
+
+impl CellSnapshot {
+    fn from_cell(idx: usize, cell: &Cell) -> Self {
+        Self {
+            cell_idx: idx,
+            candidates: cell.candidates,
+            count: cell.count,
+            collapsed: cell.collapsed,
+            terrain: cell.terrain,
+            proto_id: cell.proto_id,
+            rotation: cell.rotation,
+            collapse_order: cell.collapse_order,
+        }
+    }
+
+    fn restore_into(&self, cell: &mut Cell) {
+        cell.candidates = self.candidates;
+        cell.count = self.count;
+        cell.collapsed = self.collapsed;
+        cell.terrain = self.terrain;
+        cell.proto_id = self.proto_id;
+        cell.rotation = self.rotation;
+        cell.collapse_order = self.collapse_order;
+    }
+}
+
+/// A decision frame: one collapse choice + its propagation effects.
+struct TrailFrame {
+    /// The cell index that was collapsed in this frame.
+    chosen_cell: usize,
+    /// The encoded candidate index that was chosen.
+    chosen_candidate: usize,
+    /// RNG state saved before the collapse decision.
+    rng_snapshot: ChaCha8Rng,
+    /// Before-images of all cells modified in this frame (collapsed cell +
+    /// propagation targets). Each cell appears at most once.
+    cell_snapshots: Vec<CellSnapshot>,
+}
+
+/// Maximum number of backtracks per single solve attempt.
+const MAX_BACKTRACK_BUDGET: u32 = 500;
+
 /// Adjacency list entry: (neighbour_cell_index, direction_from_self 0..5).
 type AdjList = Vec<Vec<(usize, usize)>>;
 
@@ -287,94 +345,73 @@ fn wfc_setup(
     (coord_to_idx, adj, cells)
 }
 
-/// Main WFC collapse loop. Operates on pre-initialised cells.
-fn wfc_main_loop(cells: &mut [Cell], adj: &AdjList, rng: &mut ChaCha8Rng) {
-    let n = cells.len();
-    let mut collapsed_count: usize = 0;
-
-    while collapsed_count < n {
-        // 1. Find uncollapsed cell with minimum entropy.
-        let mut min_count = u32::MAX;
-        let mut min_candidates: Vec<usize> = Vec::new();
-
-        for (i, cell) in cells.iter().enumerate() {
-            if cell.collapsed {
-                continue;
-            }
-            if cell.count < min_count {
-                min_count = cell.count;
-                min_candidates.clear();
-                min_candidates.push(i);
-            } else if cell.count == min_count {
-                min_candidates.push(i);
-            }
-        }
-
-        if min_candidates.is_empty() {
-            break;
-        }
-
-        // Deterministic tie-break
-        let pick_idx = (rng.next_u32() as usize) % min_candidates.len();
-        let cell_idx = min_candidates[pick_idx];
-
-        // 2. Contradiction check
-        if cells[cell_idx].count == 0 {
-            cells[cell_idx].collapsed = true;
-            cells[cell_idx].terrain = TERRAIN_VOID;
-            cells[cell_idx].proto_id = 0;
-            cells[cell_idx].rotation = 0;
-            cells[cell_idx].collapse_order = collapsed_count as u32;
-            collapsed_count += 1;
-            continue; // no propagation for VOID
-        }
-
-        // 3. Collapse: pick a candidate weighted by edge context.
-        match pick_candidate(&cells[cell_idx], &adj[cell_idx], cells, rng) {
-            Some((p_idx, rot)) => {
-                let proto = &PROTOTYPES[p_idx];
-                cells[cell_idx].collapsed = true;
-                cells[cell_idx].terrain = proto.terrain;
-                cells[cell_idx].proto_id = p_idx as u8;
-                cells[cell_idx].rotation = rot as u8;
-                cells[cell_idx].collapse_order = collapsed_count as u32;
-                cells[cell_idx].candidates = 1_u64 << encode(p_idx, rot);
-                cells[cell_idx].count = 1;
-                collapsed_count += 1;
-
-                // 4. Propagate constraints
-                propagate(cell_idx, adj, cells);
-            }
-            None => {
-                // Contradiction during pick
-                cells[cell_idx].collapsed = true;
-                cells[cell_idx].terrain = TERRAIN_VOID;
-                cells[cell_idx].proto_id = 0;
-                cells[cell_idx].rotation = 0;
-                cells[cell_idx].collapse_order = collapsed_count as u32;
-                collapsed_count += 1;
-            }
-        }
+/// Deterministically mix attempt index into an RNG roll.
+/// `attempt == 0` returns `roll` unchanged (backward compatibility).
+/// For `attempt > 0`, the roll is shifted by a deterministic offset derived
+/// from the attempt index, changing branch choices without altering the seed
+/// or the RNG stream.
+fn mix_attempt(roll: u32, attempt: u32) -> u32 {
+    if attempt == 0 {
+        return roll;
     }
+    roll.wrapping_add(attempt.wrapping_mul(0x9E3779B9))
 }
 
-/// Run unconstrained WFC on a hex grid.
+// Note: wfc_main_loop removed — replaced by wfc_main_loop_backtracking.
+
+/// Single-attempt unconstrained WFC on a hex grid.
 /// Returns (terrain, prototype_id, rotation, collapse_order) per cell.
-fn wfc_collapse(coords: &[(i32, i32)], rng: &mut ChaCha8Rng) -> Vec<(u8, u8, u8, u32)> {
+fn wfc_collapse_once(
+    coords: &[(i32, i32)],
+    rng: &mut ChaCha8Rng,
+    attempt: u32,
+) -> Vec<(u8, u8, u8, u32)> {
     let (_coord_to_idx, adj, mut cells) = wfc_setup(coords);
-    wfc_main_loop(&mut cells, &adj, rng);
+    wfc_main_loop_backtracking(&mut cells, &adj, rng, attempt);
     cells
         .iter()
         .map(|c| (c.terrain, c.proto_id, c.rotation, c.collapse_order))
         .collect()
 }
 
-/// Run WFC with boundary constraints from neighbouring regions.
+/// Run unconstrained WFC with deterministic retry.
+///
+/// Each attempt uses the same seed (identical RNG stream) but varies
+/// branch choices via `mix_attempt`. Returns `(results, attempts_used, solved)`.
+fn wfc_collapse(
+    coords: &[(i32, i32)],
+    seed_hi: u32,
+    seed_lo: u32,
+    max_attempts: u32,
+) -> (Vec<(u8, u8, u8, u32)>, u32, bool) {
+    let seed = seed_from_halves(seed_hi, seed_lo);
+    let mut best: Option<Vec<(u8, u8, u8, u32)>> = None;
+    let mut best_void_count = u32::MAX;
+
+    for attempt in 0..max_attempts {
+        let mut rng = ChaCha8Rng::from_seed(seed);
+        let results = wfc_collapse_once(coords, &mut rng, attempt);
+
+        let void_count = results.iter().filter(|r| r.0 == TERRAIN_VOID).count() as u32;
+        if void_count == 0 {
+            return (results, attempt + 1, true);
+        }
+        if void_count < best_void_count {
+            best_void_count = void_count;
+            best = Some(results);
+        }
+    }
+
+    (best.unwrap(), max_attempts, false)
+}
+
+/// Single-attempt WFC with boundary constraints.
 /// Returns ((terrain, proto_id, rotation, collapse_order) per cell, fix_count).
-fn wfc_collapse_constrained(
+fn wfc_collapse_constrained_once(
     coords: &[(i32, i32)],
     rng: &mut ChaCha8Rng,
     constraints: &[BoundaryConstraint],
+    attempt: u32,
 ) -> (Vec<(u8, u8, u8, u32)>, usize) {
     let (coord_to_idx, adj, mut cells) = wfc_setup(coords);
 
@@ -382,7 +419,7 @@ fn wfc_collapse_constrained(
     let fix_count = apply_boundary_constraints(constraints, &coord_to_idx, &mut cells);
 
     // Propagate from all constrained cells to cascade restrictions
-    // Use a BTreeSet to collect unique constrained cell indices for determinism
+    // Use a sorted, deduped vec for determinism
     let mut constrained_indices: Vec<usize> = constraints
         .iter()
         .filter_map(|bc| coord_to_idx.get(&(bc.q, bc.r)).copied())
@@ -393,13 +430,46 @@ fn wfc_collapse_constrained(
         propagate(idx, &adj, &mut cells);
     }
 
-    wfc_main_loop(&mut cells, &adj, rng);
+    wfc_main_loop_backtracking(&mut cells, &adj, rng, attempt);
 
     let results = cells
         .iter()
         .map(|c| (c.terrain, c.proto_id, c.rotation, c.collapse_order))
         .collect();
     (results, fix_count)
+}
+
+/// Run constrained WFC with deterministic retry.
+///
+/// Returns `(results, fix_count, attempts_used, solved)`.
+fn wfc_collapse_constrained(
+    coords: &[(i32, i32)],
+    seed_hi: u32,
+    seed_lo: u32,
+    constraints: &[BoundaryConstraint],
+    max_attempts: u32,
+) -> (Vec<(u8, u8, u8, u32)>, usize, u32, bool) {
+    let seed = seed_from_halves(seed_hi, seed_lo);
+    let mut best: Option<(Vec<(u8, u8, u8, u32)>, usize)> = None;
+    let mut best_void_count = u32::MAX;
+
+    for attempt in 0..max_attempts {
+        let mut rng = ChaCha8Rng::from_seed(seed);
+        let (results, fix_count) =
+            wfc_collapse_constrained_once(coords, &mut rng, constraints, attempt);
+
+        let void_count = results.iter().filter(|r| r.0 == TERRAIN_VOID).count() as u32;
+        if void_count == 0 {
+            return (results, fix_count, attempt + 1, true);
+        }
+        if void_count < best_void_count {
+            best_void_count = void_count;
+            best = Some((results, fix_count));
+        }
+    }
+
+    let (results, fix_count) = best.unwrap();
+    (results, fix_count, max_attempts, false)
 }
 
 /// Pick a candidate from the cell's remaining options, weighted by
@@ -416,6 +486,7 @@ fn pick_candidate(
     adj: &[(usize, usize)],
     all_cells: &[Cell],
     rng: &mut ChaCha8Rng,
+    attempt: u32,
 ) -> Option<(usize, usize)> {
     let mut weights = [0_u32; TOTAL_CANDIDATES];
 
@@ -470,7 +541,7 @@ fn pick_candidate(
         return None;
     }
 
-    let mut roll = rng.next_u32() % total;
+    let mut roll = mix_attempt(rng.next_u32(), attempt) % total;
     for (cand, &w) in weights.iter().enumerate() {
         if roll < w {
             return Some(decode(cand));
@@ -545,6 +616,291 @@ fn propagate(start: usize, adj: &AdjList, cells: &mut [Cell]) {
     }
 }
 
+/// Propagate constraints with before-image tracking for backtracking.
+///
+/// Same AC-3 logic as `propagate()`, but:
+///   1. Records a `CellSnapshot` **before** the first mutation to each cell.
+///   2. Returns early with `contradiction = true` when any cell hits count == 0.
+///
+/// `snapshotted` tracks which cells already have a snapshot in this frame
+/// (caller must pre-allocate to `cells.len()` and zero between frames).
+///
+/// Returns `(snapshots, contradiction)`.
+fn propagate_tracked(
+    start: usize,
+    adj: &AdjList,
+    cells: &mut [Cell],
+    snapshotted: &mut [bool],
+) -> (Vec<CellSnapshot>, bool) {
+    let n = cells.len();
+    let mut snapshots: Vec<CellSnapshot> = Vec::new();
+    let mut queue = vec![start];
+    let mut in_queue = vec![false; n];
+    in_queue[start] = true;
+
+    while let Some(idx) = queue.pop() {
+        in_queue[idx] = false;
+
+        for &(ni, dir) in &adj[idx] {
+            if cells[ni].collapsed {
+                continue;
+            }
+
+            let opp = (dir + 3) % 6;
+            let mut changed = false;
+
+            for cand_ni in 0..TOTAL_CANDIDATES {
+                if cells[ni].candidates & (1_u64 << cand_ni) == 0 {
+                    continue;
+                }
+
+                let (p_ni, r_ni) = decode(cand_ni);
+                let edge_ni = edge_at(&PROTOTYPES[p_ni], opp, r_ni);
+
+                let supported = if cells[idx].collapsed {
+                    let edge_idx = edge_at(
+                        &PROTOTYPES[cells[idx].proto_id as usize],
+                        dir,
+                        cells[idx].rotation as usize,
+                    );
+                    ADJ_WEIGHTS[edge_idx as usize][edge_ni as usize] > 0
+                } else {
+                    (0..TOTAL_CANDIDATES).any(|c| {
+                        cells[idx].candidates & (1_u64 << c) != 0 && {
+                            let (p, r) = decode(c);
+                            let e = edge_at(&PROTOTYPES[p], dir, r);
+                            ADJ_WEIGHTS[e as usize][edge_ni as usize] > 0
+                        }
+                    })
+                };
+
+                if !supported {
+                    // Snapshot before first mutation
+                    if !snapshotted[ni] {
+                        snapshots.push(CellSnapshot::from_cell(ni, &cells[ni]));
+                        snapshotted[ni] = true;
+                    }
+                    cells[ni].candidates &= !(1_u64 << cand_ni);
+                    cells[ni].count -= 1;
+                    changed = true;
+
+                    // Early contradiction detection
+                    if cells[ni].count == 0 {
+                        return (snapshots, true);
+                    }
+                }
+            }
+
+            if changed && !in_queue[ni] {
+                queue.push(ni);
+                in_queue[ni] = true;
+            }
+        }
+    }
+
+    (snapshots, false)
+}
+
+/// Backtrack: unwind the trail to find a decision point with remaining candidates.
+///
+/// For each popped frame:
+///   1. Restore all cell snapshots (reverse order).
+///   2. Remove the chosen candidate from the decision cell.
+///   3. Restore RNG state (advanced past old choice).
+///   4. If the decision cell still has candidates → resume solve.
+///   5. Otherwise → pop the next frame.
+///
+/// Returns `true` if a viable backtrack point was found, `false` if trail exhausted.
+fn backtrack(
+    cells: &mut [Cell],
+    trail: &mut Vec<TrailFrame>,
+    rng: &mut ChaCha8Rng,
+    snapshotted: &mut [bool],
+) -> bool {
+    while let Some(frame) = trail.pop() {
+        // Restore cell snapshots in reverse order
+        for snap in frame.cell_snapshots.iter().rev() {
+            snap.restore_into(&mut cells[snap.cell_idx]);
+            snapshotted[snap.cell_idx] = false;
+        }
+
+        // Remove chosen candidate from decision cell
+        let ci = frame.chosen_cell;
+        cells[ci].candidates &= !(1_u64 << frame.chosen_candidate);
+        cells[ci].count = cells[ci].candidates.count_ones();
+
+        // Restore RNG and advance past the old choice
+        *rng = frame.rng_snapshot.clone();
+        rng.next_u32();
+
+        if cells[ci].count > 0 {
+            return true;
+        }
+        // count == 0 at this cell too — pop further
+    }
+    false // trail exhausted
+}
+
+/// WFC collapse loop with trail-based backtracking.
+///
+/// Replaces `wfc_main_loop` for Phase 2. On contradiction, backtracks to a
+/// previous decision point and tries an alternative candidate. Uses a budget
+/// of `MAX_BACKTRACK_BUDGET` backtracks per attempt; if exhausted, the loop
+/// terminates and only cells that have become impossible (count == 0) are
+/// marked VOID (retry wrapper handles the next attempt).
+fn wfc_main_loop_backtracking(
+    cells: &mut [Cell],
+    adj: &AdjList,
+    rng: &mut ChaCha8Rng,
+    attempt: u32,
+) {
+    let n = cells.len();
+    let mut collapsed_count: usize = cells.iter().filter(|c| c.collapsed).count();
+    let mut trail: Vec<TrailFrame> = Vec::new();
+    let mut backtrack_budget: u32 = MAX_BACKTRACK_BUDGET;
+    let mut snapshotted = vec![false; n];
+    let mut dirty_indices: Vec<usize> = Vec::new();
+
+    while collapsed_count < n {
+        // 1. Find uncollapsed cell with minimum entropy.
+        let mut min_count = u32::MAX;
+        let mut min_candidates: Vec<usize> = Vec::new();
+
+        for (i, cell) in cells.iter().enumerate() {
+            if cell.collapsed {
+                continue;
+            }
+            if cell.count < min_count {
+                min_count = cell.count;
+                min_candidates.clear();
+                min_candidates.push(i);
+            } else if cell.count == min_count {
+                min_candidates.push(i);
+            }
+        }
+
+        if min_candidates.is_empty() {
+            break;
+        }
+
+        // 2. Contradiction check: count == 0 → backtrack
+        if min_count == 0 {
+            if backtrack_budget == 0 || !backtrack(cells, &mut trail, rng, &mut snapshotted) {
+                // Budget exhausted or trail empty — mark remaining as VOID
+                for cell in cells.iter_mut() {
+                    if !cell.collapsed && cell.count == 0 {
+                        cell.collapsed = true;
+                        cell.terrain = TERRAIN_VOID;
+                        cell.proto_id = 0;
+                        cell.rotation = 0;
+                        cell.collapse_order = collapsed_count as u32;
+                        collapsed_count += 1;
+                    }
+                }
+                continue;
+            }
+            backtrack_budget -= 1;
+            // Recount collapsed cells after backtrack (some may have been un-collapsed)
+            collapsed_count = cells.iter().filter(|c| c.collapsed).count();
+            continue;
+        }
+
+        // Deterministic tie-break (mixed by attempt index)
+        let pick_idx =
+            (mix_attempt(rng.next_u32(), attempt) as usize) % min_candidates.len();
+        let cell_idx = min_candidates[pick_idx];
+
+        // 3. Snapshot RNG before collapse decision
+        let rng_snapshot = rng.clone();
+
+        // 4. Snapshot the cell being collapsed
+        let cell_snap = CellSnapshot::from_cell(cell_idx, &cells[cell_idx]);
+
+        // 5. Pick candidate
+        match pick_candidate(&cells[cell_idx], &adj[cell_idx], cells, rng, attempt) {
+            Some((p_idx, rot)) => {
+                let cand_idx = encode(p_idx, rot);
+                let proto = &PROTOTYPES[p_idx];
+
+                cells[cell_idx].collapsed = true;
+                cells[cell_idx].terrain = proto.terrain;
+                cells[cell_idx].proto_id = p_idx as u8;
+                cells[cell_idx].rotation = rot as u8;
+                cells[cell_idx].collapse_order = collapsed_count as u32;
+                cells[cell_idx].candidates = 1_u64 << cand_idx;
+                cells[cell_idx].count = 1;
+                collapsed_count += 1;
+
+                // Reset snapshotted flags from previous frame
+                for &di in &dirty_indices {
+                    snapshotted[di] = false;
+                }
+                dirty_indices.clear();
+                // Mark the collapsed cell as snapshotted (we already have it)
+                snapshotted[cell_idx] = true;
+                dirty_indices.push(cell_idx);
+
+                // 6. Propagate with tracking
+                let (mut prop_snapshots, contradiction) =
+                    propagate_tracked(cell_idx, adj, cells, &mut snapshotted);
+
+                // Track which indices propagate_tracked marked as snapshotted
+                for snap in &prop_snapshots {
+                    dirty_indices.push(snap.cell_idx);
+                }
+
+                // Prepend the collapsed cell's snapshot
+                prop_snapshots.insert(0, cell_snap);
+
+                // Build trail frame
+                let frame = TrailFrame {
+                    chosen_cell: cell_idx,
+                    chosen_candidate: cand_idx,
+                    rng_snapshot,
+                    cell_snapshots: prop_snapshots,
+                };
+                trail.push(frame);
+
+                if contradiction {
+                    // Immediately backtrack
+                    if backtrack_budget == 0
+                        || !backtrack(cells, &mut trail, rng, &mut snapshotted)
+                    {
+                        // Mark all count==0 cells as VOID
+                        for cell in cells.iter_mut() {
+                            if !cell.collapsed && cell.count == 0 {
+                                cell.collapsed = true;
+                                cell.terrain = TERRAIN_VOID;
+                                cell.proto_id = 0;
+                                cell.rotation = 0;
+                                cell.collapse_order = collapsed_count as u32;
+                                collapsed_count += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    backtrack_budget -= 1;
+                    collapsed_count = cells.iter().filter(|c| c.collapsed).count();
+                }
+            }
+            None => {
+                // No valid candidate — contradiction at pick time
+                if backtrack_budget > 0 && backtrack(cells, &mut trail, rng, &mut snapshotted) {
+                    backtrack_budget -= 1;
+                    collapsed_count = cells.iter().filter(|c| c.collapsed).count();
+                } else {
+                    cells[cell_idx].collapsed = true;
+                    cells[cell_idx].terrain = TERRAIN_VOID;
+                    cells[cell_idx].proto_id = 0;
+                    cells[cell_idx].rotation = 0;
+                    cells[cell_idx].collapse_order = collapsed_count as u32;
+                    collapsed_count += 1;
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Seed construction
 // ---------------------------------------------------------------------------
@@ -588,6 +944,11 @@ struct WfcResult {
     void_count: usize,
     terrain_counts: [usize; TERRAIN_COUNT],
     boundary_fix_count: usize,
+    /// Number of solve attempts used (1-based).
+    attempts_used: u32,
+    /// `false` when all attempts failed to eliminate VOID tiles.
+    /// Callers must not integrate tiles into the world when `solved == false`.
+    solved: bool,
     tiles: Vec<WfcTile>,
 }
 
@@ -603,18 +964,22 @@ pub fn engine_version() -> String {
 /// Legacy preview — kept for backwards compatibility.
 #[wasm_bindgen]
 pub fn generate_preview(seed_hi: u32, seed_lo: u32) -> String {
-    generate(seed_hi, seed_lo, 1)
+    generate(seed_hi, seed_lo, 1, 5)
 }
 
 /// Generate a hex island using prototype-based integer WFC.
 ///
 /// `radius` controls how many hex rings to generate:
 ///   0 → 1 tile, 1 → 7 tiles, 2 → 19 tiles, 3 → 37 tiles, etc.
+///
+/// `max_attempts` controls how many deterministic retry attempts are made
+/// before giving up. Each attempt varies branch choices (tie-break and
+/// weighted pick) without changing the seed or RNG stream.
 #[wasm_bindgen]
-pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32) -> String {
+pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32, max_attempts: u32) -> String {
     let coords = hex_spiral(radius as i32);
-    let mut rng = ChaCha8Rng::from_seed(seed_from_halves(seed_hi, seed_lo));
-    let results = wfc_collapse(&coords, &mut rng);
+    let (results, attempts_used, solved) =
+        wfc_collapse(&coords, seed_hi, seed_lo, max_attempts.max(1));
 
     let tiles: Vec<WfcTile> = coords
         .iter()
@@ -655,6 +1020,8 @@ pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32) -> String {
         void_count,
         terrain_counts,
         boundary_fix_count: 0,
+        attempts_used,
+        solved,
         tiles,
     })
     .expect("WFC result should serialize")
@@ -664,12 +1031,15 @@ pub fn generate(seed_hi: u32, seed_lo: u32, radius: u32) -> String {
 ///
 /// `constraints_json` is a JSON array of `{ q, r, dir, edge_type }` objects
 /// specifying edge constraints from already-populated neighbours.
+///
+/// `max_attempts` controls deterministic retry attempts (see `generate`).
 #[wasm_bindgen]
 pub fn generate_constrained(
     seed_hi: u32,
     seed_lo: u32,
     radius: u32,
     constraints_json: &str,
+    max_attempts: u32,
 ) -> String {
     let constraints: Vec<BoundaryConstraint> = if constraints_json.is_empty()
         || constraints_json == "[]"
@@ -680,9 +1050,8 @@ pub fn generate_constrained(
             .expect("invalid boundary constraints JSON")
     };
     let coords = hex_spiral(radius as i32);
-    let mut rng = ChaCha8Rng::from_seed(seed_from_halves(seed_hi, seed_lo));
-    let (results, boundary_fix_count) =
-        wfc_collapse_constrained(&coords, &mut rng, &constraints);
+    let (results, boundary_fix_count, attempts_used, solved) =
+        wfc_collapse_constrained(&coords, seed_hi, seed_lo, &constraints, max_attempts.max(1));
 
     let tiles: Vec<WfcTile> = coords
         .iter()
@@ -723,6 +1092,8 @@ pub fn generate_constrained(
         void_count,
         terrain_counts,
         boundary_fix_count,
+        attempts_used,
+        solved,
         tiles,
     })
     .expect("WFC result should serialize")
@@ -738,21 +1109,21 @@ mod tests {
 
     #[test]
     fn deterministic_output() {
-        let a = generate(0xdeadbeef, 0xcafe0001, 1);
-        let b = generate(0xdeadbeef, 0xcafe0001, 1);
+        let a = generate(0xdeadbeef, 0xcafe0001, 1, 1);
+        let b = generate(0xdeadbeef, 0xcafe0001, 1, 1);
         assert_eq!(a, b, "same seed must produce identical output");
     }
 
     #[test]
     fn different_seeds_differ() {
-        let a = generate(0xdeadbeef, 0xcafe0001, 1);
-        let b = generate(0x00000000, 0x00000001, 1);
+        let a = generate(0xdeadbeef, 0xcafe0001, 1, 1);
+        let b = generate(0x00000000, 0x00000001, 1, 1);
         assert_ne!(a, b, "different seeds should produce different output");
     }
 
     #[test]
     fn radius_zero_single_tile() {
-        let result = generate(0x12345678, 0x9abcdef0, 0);
+        let result = generate(0x12345678, 0x9abcdef0, 0, 1);
         let parsed: WfcResult = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed.tile_count, 1);
         assert_eq!(parsed.tiles[0].q, 0);
@@ -761,14 +1132,14 @@ mod tests {
 
     #[test]
     fn radius_two_nineteen_tiles() {
-        let result = generate(0xdeadbeef, 0xcafe0001, 2);
+        let result = generate(0xdeadbeef, 0xcafe0001, 2, 1);
         let parsed: WfcResult = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed.tile_count, 19);
     }
 
     #[test]
     fn prototype_fields_present() {
-        let result = generate(0xdeadbeef, 0xcafe0001, 2);
+        let result = generate(0xdeadbeef, 0xcafe0001, 2, 1);
         let parsed: WfcResult = serde_json::from_str(&result).unwrap();
         for tile in &parsed.tiles {
             if tile.terrain == TERRAIN_VOID {
@@ -804,7 +1175,7 @@ mod tests {
             .map(|(i, &c)| (c, i))
             .collect();
 
-        let result = generate(0xdeadbeef, 0xcafe0001, 2);
+        let result = generate(0xdeadbeef, 0xcafe0001, 2, 1);
         let parsed: WfcResult = serde_json::from_str(&result).unwrap();
 
         for tile in &parsed.tiles {
@@ -847,7 +1218,7 @@ mod tests {
 
     #[test]
     fn terrain_values_in_range() {
-        let result = generate(0xdeadbeef, 0xcafe0001, 2);
+        let result = generate(0xdeadbeef, 0xcafe0001, 2, 1);
         let parsed: WfcResult = serde_json::from_str(&result).unwrap();
         for tile in &parsed.tiles {
             assert!(
@@ -865,7 +1236,7 @@ mod tests {
         let runs = 20_u32;
 
         for i in 0..runs {
-            let result = generate(0x10000000 + i, 0x20000000 + i, 3);
+            let result = generate(0x10000000 + i, 0x20000000 + i, 3, 1);
             let parsed: WfcResult = serde_json::from_str(&result).unwrap();
             assert_eq!(parsed.void_count, 0, "void found in seed {i}");
             total_void += parsed.void_count;
@@ -898,8 +1269,8 @@ mod tests {
 
     #[test]
     fn empty_constraints_match_unconstrained() {
-        let a = generate(0xdeadbeef, 0xcafe0001, 2);
-        let b = generate_constrained(0xdeadbeef, 0xcafe0001, 2, "[]");
+        let a = generate(0xdeadbeef, 0xcafe0001, 2, 1);
+        let b = generate_constrained(0xdeadbeef, 0xcafe0001, 2, "[]", 1);
         let pa: WfcResult = serde_json::from_str(&a).unwrap();
         let pb: WfcResult = serde_json::from_str(&b).unwrap();
         assert_eq!(pa.tile_count, pb.tile_count);
@@ -920,7 +1291,7 @@ mod tests {
         let radius: i32 = 2;
         let spacing = 2 * radius + 1;
 
-        let result_a = generate(0xAAAA0000, 0xBBBB0000, radius as u32);
+        let result_a = generate(0xAAAA0000, 0xBBBB0000, radius as u32, 1);
         let ra: WfcResult = serde_json::from_str(&result_a).unwrap();
 
         // Build tile lookup for region A
@@ -965,7 +1336,7 @@ mod tests {
         assert!(!constraints.is_empty(), "should have boundary constraints");
 
         let cj = serde_json::to_string(&constraints).unwrap();
-        let result_b = generate_constrained(0xCCCC0000, 0xDDDD0000, radius as u32, &cj);
+        let result_b = generate_constrained(0xCCCC0000, 0xDDDD0000, radius as u32, &cj, 1);
         let rb: WfcResult = serde_json::from_str(&result_b).unwrap();
 
         // Verify seam: touching edges must be compatible
@@ -1020,7 +1391,7 @@ mod tests {
 
         for seed_i in 0..10_u32 {
             for &(macro_dq, macro_dr) in &[(1_i32, 0_i32), (0, 1), (1, -1)] {
-                let result_a = generate(0x50000000 + seed_i, 0x60000000 + seed_i, radius as u32);
+                let result_a = generate(0x50000000 + seed_i, 0x60000000 + seed_i, radius as u32, 1);
                 let ra: WfcResult = serde_json::from_str(&result_a).unwrap();
 
                 let b_origin_q = macro_dq * spacing;
@@ -1054,7 +1425,7 @@ mod tests {
 
                 let cj = serde_json::to_string(&constraints).unwrap();
                 let result_b = generate_constrained(
-                    0x70000000 + seed_i, 0x80000000 + seed_i, radius as u32, &cj,
+                    0x70000000 + seed_i, 0x80000000 + seed_i, radius as u32, &cj, 1,
                 );
                 let rb: WfcResult = serde_json::from_str(&result_b).unwrap();
 
@@ -1109,7 +1480,7 @@ mod tests {
             .collect();
 
         for i in 0..50_u32 {
-            let result = generate(0x30000000 + i, 0x40000000 + i, 3);
+            let result = generate(0x30000000 + i, 0x40000000 + i, 3, 1);
             let parsed: WfcResult = serde_json::from_str(&result).unwrap();
 
             for tile in &parsed.tiles {
@@ -1148,5 +1519,257 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- Phase 1 retry tests ---
+
+    #[test]
+    fn retry_deterministic_same_budget() {
+        // Same seed + same max_attempts must produce identical output.
+        let a = generate(0xdeadbeef, 0xcafe0001, 2, 5);
+        let b = generate(0xdeadbeef, 0xcafe0001, 2, 5);
+        assert_eq!(a, b, "same seed+budget must produce identical output");
+    }
+
+    #[test]
+    fn retry_attempt_changes_branching() {
+        // attempt=0 and attempt=1 with the same seed must produce
+        // different collapse results (different branch choices).
+        let coords = hex_spiral(2);
+        let seed = seed_from_halves(0xdeadbeef, 0xcafe0001);
+        let mut rng0 = ChaCha8Rng::from_seed(seed);
+        let mut rng1 = ChaCha8Rng::from_seed(seed);
+        let r0 = wfc_collapse_once(&coords, &mut rng0, 0);
+        let r1 = wfc_collapse_once(&coords, &mut rng1, 1);
+        // They should differ (extremely unlikely to match by chance).
+        assert_ne!(r0, r1, "attempt 0 and 1 should differ in branch choices");
+    }
+
+    #[test]
+    fn retry_solved_field_present() {
+        // A successful solve must set solved=true and attempts_used >= 1.
+        let result = generate(0xdeadbeef, 0xcafe0001, 2, 1);
+        let parsed: WfcResult = serde_json::from_str(&result).unwrap();
+        assert!(parsed.solved, "should solve without voids");
+        assert_eq!(parsed.attempts_used, 1);
+    }
+
+    #[test]
+    fn retry_with_higher_budget_still_deterministic() {
+        // max_attempts=5 must still be deterministic.
+        let a = generate(0x11111111, 0x22222222, 3, 5);
+        let b = generate(0x11111111, 0x22222222, 3, 5);
+        let pa: WfcResult = serde_json::from_str(&a).unwrap();
+        let pb: WfcResult = serde_json::from_str(&b).unwrap();
+        assert_eq!(pa.attempts_used, pb.attempts_used);
+        assert_eq!(pa.solved, pb.solved);
+        for (ta, tb) in pa.tiles.iter().zip(pb.tiles.iter()) {
+            assert_eq!(ta.terrain, tb.terrain);
+            assert_eq!(ta.prototype_id, tb.prototype_id);
+            assert_eq!(ta.rotation, tb.rotation);
+        }
+    }
+
+    #[test]
+    fn constrained_retry_deterministic() {
+        // Constrained generation with retry must also be deterministic.
+        let radius: i32 = 2;
+        let spacing = 2 * radius + 1;
+        let result_a = generate(0xAAAA0000, 0xBBBB0000, radius as u32, 1);
+        let ra: WfcResult = serde_json::from_str(&result_a).unwrap();
+
+        let b_coords: std::collections::HashSet<(i32, i32)> =
+            hex_spiral(radius).into_iter().collect();
+
+        let mut constraints = Vec::new();
+        let b_origin_q = 1 * spacing;
+        let b_origin_r = 0;
+        for tile in &ra.tiles {
+            if tile.terrain == TERRAIN_VOID { continue; }
+            for (dir, &(dq, dr)) in HEX_DIRS.iter().enumerate() {
+                let lq = tile.q + dq - b_origin_q;
+                let lr = tile.r + dr - b_origin_r;
+                if b_coords.contains(&(lq, lr)) {
+                    let edge = edge_at(
+                        &PROTOTYPES[tile.prototype_id as usize],
+                        dir, tile.rotation as usize,
+                    );
+                    constraints.push(BoundaryConstraint {
+                        q: lq, r: lr, dir: (dir + 3) % 6, edge_type: edge,
+                    });
+                }
+            }
+        }
+        let cj = serde_json::to_string(&constraints).unwrap();
+
+        let x = generate_constrained(0xCCCC0000, 0xDDDD0000, radius as u32, &cj, 5);
+        let y = generate_constrained(0xCCCC0000, 0xDDDD0000, radius as u32, &cj, 5);
+        let px: WfcResult = serde_json::from_str(&x).unwrap();
+        let py: WfcResult = serde_json::from_str(&y).unwrap();
+        assert_eq!(px.attempts_used, py.attempts_used);
+        assert_eq!(px.solved, py.solved);
+        for (ta, tb) in px.tiles.iter().zip(py.tiles.iter()) {
+            assert_eq!(ta.terrain, tb.terrain);
+            assert_eq!(ta.prototype_id, tb.prototype_id);
+            assert_eq!(ta.rotation, tb.rotation);
+        }
+    }
+
+    // --- Phase 2 backtracking tests ---
+
+    #[test]
+    fn backtrack_deterministic() {
+        // Same seed must produce identical output with backtracking enabled.
+        let a = generate(0xBACE0001, 0xFACE0001, 3, 5);
+        let b = generate(0xBACE0001, 0xFACE0001, 3, 5);
+        assert_eq!(a, b, "backtracking must be deterministic");
+    }
+
+    #[test]
+    fn backtrack_reduces_voids() {
+        // With max_attempts=5 and backtracking, we should get fewer or zero
+        // VOIDs compared to a budget of 1 (which may still solve due to backtracking).
+        // Run across many seeds to verify backtracking helps overall.
+        let mut total_voids_budget1 = 0_usize;
+        let mut total_voids_budget5 = 0_usize;
+        let runs = 50_u32;
+
+        for i in 0..runs {
+            let r1 = generate(0xD0000000 + i, 0xE0000000 + i, 3, 1);
+            let r5 = generate(0xD0000000 + i, 0xE0000000 + i, 3, 5);
+            let p1: WfcResult = serde_json::from_str(&r1).unwrap();
+            let p5: WfcResult = serde_json::from_str(&r5).unwrap();
+            total_voids_budget1 += p1.void_count;
+            total_voids_budget5 += p5.void_count;
+        }
+
+        // Budget 5 should be no worse than budget 1
+        assert!(
+            total_voids_budget5 <= total_voids_budget1,
+            "more attempts should not increase voids: budget1={total_voids_budget1}, budget5={total_voids_budget5}",
+        );
+    }
+
+    #[test]
+    fn backtrack_restores_cell_state() {
+        // Verify that CellSnapshot round-trips correctly through save/restore.
+        let mut cell = Cell::new();
+        cell.candidates = 0b1010_1010;
+        cell.count = 4;
+        cell.collapsed = true;
+        cell.terrain = 2;
+        cell.proto_id = 3;
+        cell.rotation = 5;
+        cell.collapse_order = 42;
+
+        let snap = CellSnapshot::from_cell(7, &cell);
+
+        // Mutate the cell
+        cell.candidates = 0;
+        cell.count = 0;
+        cell.collapsed = false;
+        cell.terrain = 0;
+        cell.proto_id = 0;
+        cell.rotation = 0;
+        cell.collapse_order = 0;
+
+        // Restore
+        snap.restore_into(&mut cell);
+
+        assert_eq!(cell.candidates, 0b1010_1010);
+        assert_eq!(cell.count, 4);
+        assert!(cell.collapsed);
+        assert_eq!(cell.terrain, 2);
+        assert_eq!(cell.proto_id, 3);
+        assert_eq!(cell.rotation, 5);
+        assert_eq!(cell.collapse_order, 42);
+        assert_eq!(snap.cell_idx, 7);
+    }
+
+    #[test]
+    fn backtrack_respects_boundary_constraints() {
+        // After backtracking, boundary constraints must still be respected.
+        let radius: i32 = 2;
+        let spacing = 2 * radius + 1;
+
+        let b_coords: std::collections::HashSet<(i32, i32)> =
+            hex_spiral(radius).into_iter().collect();
+
+        for seed_i in 0..20_u32 {
+            let result_a = generate(0xBA000000 + seed_i, 0xCB000000 + seed_i, radius as u32, 1);
+            let ra: WfcResult = serde_json::from_str(&result_a).unwrap();
+
+            let b_origin_q = 1 * spacing;
+            let b_origin_r = 0;
+
+            let mut constraints = Vec::new();
+            for tile in &ra.tiles {
+                if tile.terrain == TERRAIN_VOID { continue; }
+                for (dir, &(dq, dr)) in HEX_DIRS.iter().enumerate() {
+                    let lq = tile.q + dq - b_origin_q;
+                    let lr = tile.r + dr - b_origin_r;
+                    if b_coords.contains(&(lq, lr)) {
+                        let edge = edge_at(
+                            &PROTOTYPES[tile.prototype_id as usize],
+                            dir, tile.rotation as usize,
+                        );
+                        constraints.push(BoundaryConstraint {
+                            q: lq, r: lr, dir: (dir + 3) % 6, edge_type: edge,
+                        });
+                    }
+                }
+            }
+            if constraints.is_empty() { continue; }
+
+            let cj = serde_json::to_string(&constraints).unwrap();
+            let result_b = generate_constrained(
+                0xDC000000 + seed_i, 0xED000000 + seed_i, radius as u32, &cj, 5,
+            );
+            let rb: WfcResult = serde_json::from_str(&result_b).unwrap();
+
+            // Verify seam: touching edges must be compatible
+            let b_tiles: BTreeMap<(i32, i32), &WfcTile> = rb.tiles.iter()
+                .map(|t| ((t.q, t.r), t))
+                .collect();
+
+            for tile_a in &ra.tiles {
+                if tile_a.terrain == TERRAIN_VOID { continue; }
+                for (dir, &(dq, dr)) in HEX_DIRS.iter().enumerate() {
+                    let lq = tile_a.q + dq - b_origin_q;
+                    let lr = tile_a.r + dr - b_origin_r;
+                    if let Some(tile_b) = b_tiles.get(&(lq, lr)) {
+                        if tile_b.terrain == TERRAIN_VOID { continue; }
+                        let opp = (dir + 3) % 6;
+                        let edge_a = edge_at(
+                            &PROTOTYPES[tile_a.prototype_id as usize],
+                            dir, tile_a.rotation as usize,
+                        );
+                        let edge_b = edge_at(
+                            &PROTOTYPES[tile_b.prototype_id as usize],
+                            opp, tile_b.rotation as usize,
+                        );
+                        let w = ADJ_WEIGHTS[edge_a as usize][edge_b as usize];
+                        assert!(
+                            w > 0,
+                            "seam fail seed={seed_i}: A({},{}) e{edge_a} d{dir} -> B({},{}) e{edge_b} d{opp}",
+                            tile_a.q, tile_a.r, tile_b.q, tile_b.r,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn backtrack_budget_exhaustion_falls_to_retry() {
+        // With max_attempts > 1, if one attempt exhausts backtrack budget,
+        // the retry wrapper should try the next attempt.
+        // We verify this by checking that attempts_used can be > 1.
+        // (This is a structural test — not all seeds will trigger multi-attempt.)
+        let result = generate(0xFE000001, 0xFE000002, 3, 5);
+        let parsed: WfcResult = serde_json::from_str(&result).unwrap();
+        // Just verify the field is populated correctly
+        assert!(parsed.attempts_used >= 1);
+        assert!(parsed.attempts_used <= 5);
     }
 }

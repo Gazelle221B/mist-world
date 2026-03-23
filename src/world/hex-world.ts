@@ -37,10 +37,17 @@ export interface WorldTile extends TileData {
 export interface RegionState {
   readonly macroQ: number;
   readonly macroR: number;
-  status: "populated" | "placeholder";
+  status: "populated" | "placeholder" | "failed";
   tiles: TileData[] | null;
   boundaryFixCount: number;
+  attemptsUsed: number;
 }
+
+/** Result of an expand() call. */
+export type ExpandResult =
+  | { kind: "expanded"; newTiles: WorldTile[]; attemptsUsed: number }
+  | { kind: "failed"; attemptsUsed: number }
+  | { kind: "invalid" };
 
 function regionKey(q: number, r: number): string {
   return `${q},${r}`;
@@ -111,29 +118,46 @@ export class HexWorld {
   }
 
   /**
-   * Expand a placeholder into a populated region.
-   * Returns the newly added WorldTiles (empty array if invalid).
+   * Expand a placeholder (or failed region) into a populated region.
+   * Returns an `ExpandResult` describing the outcome.
    */
-  expand(macroQ: number, macroR: number): WorldTile[] {
+  expand(macroQ: number, macroR: number): ExpandResult {
     const key = regionKey(macroQ, macroR);
     const region = this.regions.get(key);
-    if (!region || region.status !== "placeholder") return [];
+    if (
+      !region ||
+      (region.status !== "placeholder" && region.status !== "failed")
+    ) {
+      return { kind: "invalid" };
+    }
 
     // Snapshot existing keys so we only return truly new tiles
     const existingKeys = new Set(this._globalTiles.keys());
-    this.populateRegion(region);
+    const solved = this.populateRegion(region);
+
+    if (!solved) {
+      // Add placeholders around (so the user can still expand neighbours)
+      for (const [dq, dr] of MACRO_DIRS) {
+        this.ensurePlaceholder(macroQ + dq, macroR + dr);
+      }
+      return { kind: "failed", attemptsUsed: region.attemptsUsed };
+    }
 
     // Collect only the tiles that were newly added
     const newTiles: WorldTile[] = [];
-    for (const [key, wt] of this._globalTiles) {
-      if (!existingKeys.has(key)) newTiles.push(wt);
+    for (const [k, wt] of this._globalTiles) {
+      if (!existingKeys.has(k)) newTiles.push(wt);
     }
 
     // Add placeholders around the newly populated region
     for (const [dq, dr] of MACRO_DIRS) {
       this.ensurePlaceholder(macroQ + dq, macroR + dr);
     }
-    return newTiles;
+    return {
+      kind: "expanded",
+      newTiles,
+      attemptsUsed: region.attemptsUsed,
+    };
   }
 
   /** All populated regions. */
@@ -144,6 +168,11 @@ export class HexWorld {
   /** All placeholder regions. */
   placeholders(): RegionState[] {
     return [...this.regions.values()].filter((r) => r.status === "placeholder");
+  }
+
+  /** All failed regions (re-clickable for retry). */
+  failedRegions(): RegionState[] {
+    return [...this.regions.values()].filter((r) => r.status === "failed");
   }
 
   /** Number of populated regions. */
@@ -295,13 +324,18 @@ export class HexWorld {
         status: "placeholder",
         tiles: null,
         boundaryFixCount: 0,
+        attemptsUsed: 0,
       };
       this.regions.set(key, region);
     }
     this.populateRegion(region);
   }
 
-  private populateRegion(region: RegionState): void {
+  /**
+   * Run WFC for this region. Returns `true` if solved, `false` if failed.
+   * On failure the region is marked as `"failed"` and tiles are NOT merged.
+   */
+  private populateRegion(region: RegionState): boolean {
     const { hi, lo } = this.deriveSeed(region.macroQ, region.macroR);
     const constraints = this.extractBoundaryConstraints(
       region.macroQ,
@@ -311,6 +345,15 @@ export class HexWorld {
     const result = constraints.length > 0
       ? generateIslandConstrained(hi, lo, this.solveRadius, constraints)
       : generateIsland(hi, lo, this.solveRadius);
+
+    region.attemptsUsed = result.attemptsUsed;
+
+    if (!result.solved) {
+      region.status = "failed";
+      region.tiles = null;
+      region.boundaryFixCount = 0;
+      return false;
+    }
 
     region.status = "populated";
     region.tiles = result.tiles;
@@ -334,6 +377,7 @@ export class HexWorld {
         worldR: wr,
       });
     }
+    return true;
   }
 
   /**
@@ -376,6 +420,7 @@ export class HexWorld {
         status: "placeholder",
         tiles: null,
         boundaryFixCount: 0,
+        attemptsUsed: 0,
       });
     }
   }
