@@ -12,26 +12,18 @@ import {
   WebGPUEngine,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
-import { initBridge } from "./world/wfc-bridge.ts";
-import {
-  type IslandHandle,
-  type PlaceholderHandle,
-  renderWorld,
-  renderPlaceholders,
-} from "./world/island-renderer.ts";
+import { initBridge, generateIsland } from "./world/wfc-bridge.ts";
+import { type IslandHandle, renderWorld } from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
 import { terrainCountsByName } from "./world/terrain.ts";
-import { HexWorld } from "./world/hex-world.ts";
 
 declare global {
   interface Window {
     render_game_to_text?: () => string;
-    expand_region?: (macroQ: number, macroR: number) => void;
   }
 }
 
 type RendererKind = "webgpu" | "webgl2";
-type InteractionMode = "move" | "build";
 
 interface RuntimeState {
   renderer: RendererKind;
@@ -42,12 +34,8 @@ interface RuntimeState {
   seedHex: string;
   generator: "wasm" | "ts-fallback";
   radius: number;
-  mode: InteractionMode;
-  regionCount: number;
-  frontierCount: number;
   totalTileCount: number;
   voidCount: number;
-  boundaryFixCount: number;
   terrainCounts: number[];
 }
 
@@ -64,7 +52,7 @@ app.innerHTML = `
     <header class="masthead">
       <p class="eyebrow">Mist World / Sprint 0</p>
       <h1>Babylon + WASM bootstrap</h1>
-      <p class="summary">Expandable hex world — click placeholders to grow.</p>
+      <p class="summary">Single-island visual slice.</p>
     </header>
     <div class="viewport">
       <canvas id="render-canvas" aria-label="Mist World viewport"></canvas>
@@ -75,8 +63,6 @@ app.innerHTML = `
         <span id="seed-pill" class="pill pill--dim">seed: --</span>
         <span id="gen-pill" class="pill pill--dim">gen: --</span>
         <span id="radius-pill" class="pill pill--dim">r: --</span>
-        <span id="mode-pill" class="pill pill--dim">mode: move</span>
-        <span id="region-pill" class="pill pill--dim">regions: 0</span>
       </div>
     </div>
     <p id="status-line" class="status-line">Preparing engine bootstrap...</p>
@@ -90,8 +76,6 @@ const meshPill = mustQuerySelector<HTMLSpanElement>("#mesh-pill");
 const seedPill = mustQuerySelector<HTMLSpanElement>("#seed-pill");
 const genPill = mustQuerySelector<HTMLSpanElement>("#gen-pill");
 const radiusPill = mustQuerySelector<HTMLSpanElement>("#radius-pill");
-const modePill = mustQuerySelector<HTMLSpanElement>("#mode-pill");
-const regionPill = mustQuerySelector<HTMLSpanElement>("#region-pill");
 const statusLine = mustQuerySelector<HTMLParagraphElement>("#status-line");
 
 const state: RuntimeState = {
@@ -102,13 +86,9 @@ const state: RuntimeState = {
   cameraRadius: 0,
   seedHex: "",
   generator: "ts-fallback",
-  radius: 2,
-  mode: "move",
-  regionCount: 0,
-  frontierCount: 0,
+  radius: 4,
   totalTileCount: 0,
   voidCount: 0,
-  boundaryFixCount: 0,
   terrainCounts: [0, 0, 0, 0, 0, 0],
 };
 
@@ -141,13 +121,10 @@ function updateHud() {
   rendererPill.textContent = `renderer: ${state.renderer}`;
   fpsPill.textContent = `fps: ${state.fps.toFixed(1)}`;
   meshPill.textContent = `meshes: ${state.meshCount}`;
-  modePill.textContent = `mode: ${state.mode}`;
-  regionPill.textContent = `regions: ${state.regionCount}`;
 }
 
 function renderGameToText() {
   return JSON.stringify({
-    mode: state.mode,
     renderer: state.renderer,
     sceneReady: state.sceneReady,
     meshCount: state.meshCount,
@@ -156,11 +133,8 @@ function renderGameToText() {
     seedHex: state.seedHex,
     generator: state.generator,
     radius: state.radius,
-    regionCount: state.regionCount,
-    frontierCount: state.frontierCount,
-    globalTileCount: state.totalTileCount,
+    tileCount: state.totalTileCount,
     voidCount: state.voidCount,
-    boundaryFixCount: state.boundaryFixCount,
     terrainCounts: state.terrainCounts,
     terrainCountsByName: terrainCountsByName(state.terrainCounts),
   });
@@ -208,71 +182,39 @@ async function bootstrap() {
   state.generator = genKind;
 
   // -----------------------------------------------------------------------
-  // World state
+  // Single-island generation
   // -----------------------------------------------------------------------
 
   const seed = seedFromHash();
-  const radius = radiusFromQuery();
+  let radius = radiusFromQuery() || 4;
   state.radius = radius;
   state.seedHex = `${(seed.hi >>> 0).toString(16).padStart(8, "0")}${(seed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
-  const world = new HexWorld(radius, seed.hi, seed.lo);
-  world.init();
+  let currentHandle: IslandHandle | null = null;
 
-  // Track world rendering and placeholders
-  const worldHandles: IslandHandle[] = [];
-  let placeholderHandle: PlaceholderHandle | null = null;
+  async function renderIsland(seedHi: number, seedLo: number, r: number) {
+    if (currentHandle) {
+      currentHandle.dispose();
+      currentHandle = null;
+    }
 
-  /** Aggregate terrain stats from globalTiles. */
-  function updateWorldStats() {
-    const tiles = world.allTiles();
+    const result = generateIsland(seedHi, seedLo, r);
+
+    // Count terrains and voids
     const counts = [0, 0, 0, 0, 0, 0];
-
-    for (const tile of tiles) {
+    let voids = 0;
+    for (const tile of result.tiles) {
+      if (tile.terrain === 255) { voids++; continue; }
       counts[tile.terrain]++;
     }
-
-    state.regionCount = world.populatedCount();
-    state.frontierCount = world.placeholders().length;
-    state.totalTileCount = world.globalTileCount();
-    state.voidCount = world.totalVoidCount();
-    state.boundaryFixCount = world.totalBoundaryFixes();
+    state.totalTileCount = result.tiles.length - voids;
+    state.voidCount = voids;
     state.terrainCounts = counts;
-  }
 
-  /** Dispose all world tile handles. */
-  function disposeWorldHandles() {
-    for (const h of worldHandles) h.dispose();
-    worldHandles.length = 0;
-  }
+    // Render tiles (exclude VOIDs)
+    const visibleTiles = result.tiles.filter((t) => t.terrain !== 255);
+    currentHandle = await renderWorld(scene, visibleTiles);
 
-  /** Rebuild placeholder visuals. */
-  function rebuildPlaceholders() {
-    if (placeholderHandle) {
-      placeholderHandle.dispose();
-      placeholderHandle = null;
-    }
-
-    const phs = world.placeholders();
-    if (phs.length > 0) {
-      placeholderHandle = renderPlaceholders(scene, phs, world.spacing);
-    }
-  }
-
-  /** Full rebuild: dispose all, re-render everything without animation. */
-  async function fullRebuild() {
-    disposeWorldHandles();
-    if (placeholderHandle) {
-      placeholderHandle.dispose();
-      placeholderHandle = null;
-    }
-
-    const tiles = world.allTiles();
-    if (tiles.length > 0) {
-      worldHandles.push(await renderWorld(scene, tiles));
-    }
-    rebuildPlaceholders();
-    updateWorldStats();
     updateStatusLine();
   }
 
@@ -286,68 +228,15 @@ async function bootstrap() {
         `Warning: ${state.voidCount} void tile(s) — WFC contradiction. seed ${state.seedHex}`;
     } else {
       statusLine.textContent =
-        `${state.regionCount} region(s), ${state.totalTileCount} tiles. ` +
-        `[B] toggle build mode. Click placeholder to expand.`;
+        `${state.totalTileCount} tiles. seed ${state.seedHex}`;
     }
   }
 
   // Initial render
-  await fullRebuild();
+  await renderIsland(seed.hi, seed.lo, radius);
 
   // -----------------------------------------------------------------------
-  // Interaction: Build mode + placeholder clicking
-  // -----------------------------------------------------------------------
-
-  let expanding = false;
-
-  async function expandAt(macroQ: number, macroR: number) {
-    if (expanding) return; // prevent double-click during animation
-    expanding = true;
-    statusLine.textContent = `Building region (${macroQ}, ${macroR})...`;
-
-    const newTiles = world.expand(macroQ, macroR);
-    if (newTiles.length === 0) {
-      statusLine.textContent = `Cannot expand at (${macroQ}, ${macroR}).`;
-      expanding = false;
-      return;
-    }
-
-    // Render only the new tiles with rise animation
-    const handle = await renderWorld(scene, newTiles, true);
-    worldHandles.push(handle);
-
-    rebuildPlaceholders();
-    updateWorldStats();
-    updateStatusLine();
-    expanding = false;
-  }
-
-  scene.onPointerObservable.add((pointerInfo) => {
-    if (pointerInfo.type !== 1) return; // POINTERDOWN = 1
-    if (state.mode !== "build") return;
-    if (expanding) return; // guard against clicks during expand
-
-    const pickResult = scene.pick(
-      scene.pointerX,
-      scene.pointerY,
-      (mesh) => mesh.metadata?.macroQ !== undefined,
-    );
-    if (!pickResult?.hit || !pickResult.pickedMesh) return;
-
-    const meta = pickResult.pickedMesh.metadata as {
-      macroQ: number;
-      macroR: number;
-    };
-    expandAt(meta.macroQ, meta.macroR);
-  });
-
-  window.expand_region = (macroQ: number, macroR: number) => {
-    if (expanding) return;
-    expandAt(macroQ, macroR);
-  };
-
-  // -----------------------------------------------------------------------
-  // Render loop + keyboard
+  // Render loop
   // -----------------------------------------------------------------------
 
   const step = () => {
@@ -364,30 +253,21 @@ async function bootstrap() {
 
   window.render_game_to_text = renderGameToText;
 
-  window.addEventListener("hashchange", () => {
+  window.addEventListener("hashchange", async () => {
     const newSeed = seedFromHash();
-    const newRadius = radiusFromQuery();
+    const newRadius = radiusFromQuery() || 4;
     const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
     if (hex === state.seedHex && newRadius === state.radius) return;
 
     state.seedHex = hex;
     state.radius = newRadius;
-    world.reset(newSeed.hi, newSeed.lo);
-    fullRebuild();
+    radius = newRadius;
+    await renderIsland(newSeed.hi, newSeed.lo, newRadius);
   });
 
   window.addEventListener("keydown", async (event) => {
-    const key = event.key.toLowerCase();
-
-    if (key === "b") {
-      state.mode = state.mode === "move" ? "build" : "move";
-      modePill.textContent = `mode: ${state.mode}`;
-      // Visual feedback: show/hide placeholder edges
-      canvas.style.cursor = state.mode === "build" ? "crosshair" : "default";
-    }
-
-    if (key === "f") {
+    if (event.key.toLowerCase() === "f") {
       if (document.fullscreenElement) {
         await document.exitFullscreen();
       } else {
