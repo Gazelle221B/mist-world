@@ -20,7 +20,7 @@ import {
   renderPlaceholders,
 } from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
-import { terrainCountsByName } from "./world/terrain.ts";
+import { TERRAIN_COUNT, terrainCountsByName } from "./world/terrain.ts";
 import { HexWorld } from "./world/hex-world.ts";
 
 declare global {
@@ -111,7 +111,7 @@ const state: RuntimeState = {
   totalTileCount: 0,
   voidCount: 0,
   boundaryFixCount: 0,
-  terrainCounts: [0, 0, 0, 0, 0, 0],
+  terrainCounts: Array(TERRAIN_COUNT).fill(0) as number[],
 };
 
 async function createEngine(target: HTMLCanvasElement) {
@@ -230,7 +230,7 @@ async function bootstrap() {
   /** Aggregate terrain stats from globalTiles. */
   function updateWorldStats() {
     const tiles = world.allTiles();
-    const counts = [0, 0, 0, 0, 0, 0];
+    const counts = Array(TERRAIN_COUNT).fill(0) as number[];
 
     for (const tile of tiles) {
       counts[tile.terrain]++;
@@ -315,36 +315,37 @@ async function bootstrap() {
   async function expandAt(macroQ: number, macroR: number) {
     if (expanding) return; // prevent double-click during animation
     expanding = true;
-    statusLine.textContent = `Building region (${macroQ}, ${macroR})...`;
+    try {
+      statusLine.textContent = `Building region (${macroQ}, ${macroR})...`;
 
-    const result = world.expand(macroQ, macroR);
+      const result = world.expand(macroQ, macroR);
 
-    if (result.kind === "invalid") {
-      statusLine.textContent = `Cannot expand at (${macroQ}, ${macroR}).`;
-      expanding = false;
-      return;
-    }
+      if (result.kind === "invalid") {
+        statusLine.textContent = `Cannot expand at (${macroQ}, ${macroR}).`;
+        return;
+      }
 
-    if (result.kind === "failed") {
+      if (result.kind === "failed") {
+        rebuildPlaceholders();
+        updateWorldStats();
+        statusLine.textContent =
+          `Region solve failed at (${macroQ}, ${macroR}) ` +
+          `after ${result.attemptsUsed} attempt(s). Click to retry.`;
+        return;
+      }
+
+      // kind === "expanded"
+      if (result.newTiles.length > 0) {
+        const handle = await renderWorld(scene, result.newTiles, true);
+        worldHandles.push(handle);
+      }
+
       rebuildPlaceholders();
       updateWorldStats();
-      statusLine.textContent =
-        `Region solve failed at (${macroQ}, ${macroR}) ` +
-        `after ${result.attemptsUsed} attempt(s). Click to retry.`;
+      updateStatusLine();
+    } finally {
       expanding = false;
-      return;
     }
-
-    // kind === "expanded"
-    if (result.newTiles.length > 0) {
-      const handle = await renderWorld(scene, result.newTiles, true);
-      worldHandles.push(handle);
-    }
-
-    rebuildPlaceholders();
-    updateWorldStats();
-    updateStatusLine();
-    expanding = false;
   }
 
   scene.onPointerObservable.add((pointerInfo) => {
@@ -389,17 +390,22 @@ async function bootstrap() {
 
   window.render_game_to_text = renderGameToText;
 
-  window.addEventListener("hashchange", () => {
-    const newSeed = seedFromHash();
-    const newRadius = radiusFromQuery();
-    const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
+  window.addEventListener("hashchange", async () => {
+    try {
+      const newSeed = seedFromHash();
+      const newRadius = radiusFromQuery();
+      const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
-    if (hex === state.seedHex && newRadius === state.radius) return;
+      if (hex === state.seedHex && newRadius === state.radius) return;
 
-    state.seedHex = hex;
-    state.radius = newRadius;
-    world.reset(newSeed.hi, newSeed.lo);
-    fullRebuild();
+      state.seedHex = hex;
+      state.radius = newRadius;
+      world.reset(newSeed.hi, newSeed.lo);
+      await fullRebuild();
+    } catch (error) {
+      console.error(error);
+      statusLine.textContent = "World rebuild failed. Check the console for details.";
+    }
   });
 
   window.addEventListener("keydown", async (event) => {

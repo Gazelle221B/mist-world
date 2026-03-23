@@ -745,8 +745,9 @@ fn backtrack(
 ///
 /// Replaces `wfc_main_loop` for Phase 2. On contradiction, backtracks to a
 /// previous decision point and tries an alternative candidate. Uses a budget
-/// of `MAX_BACKTRACK_BUDGET` backtracks per attempt; if exhausted, remaining
-/// uncollapsed cells are marked VOID (retry wrapper handles next attempt).
+/// of `MAX_BACKTRACK_BUDGET` backtracks per attempt; if exhausted, the loop
+/// terminates and only cells that have become impossible (count == 0) are
+/// marked VOID (retry wrapper handles the next attempt).
 fn wfc_main_loop_backtracking(
     cells: &mut [Cell],
     adj: &AdjList,
@@ -758,6 +759,7 @@ fn wfc_main_loop_backtracking(
     let mut trail: Vec<TrailFrame> = Vec::new();
     let mut backtrack_budget: u32 = MAX_BACKTRACK_BUDGET;
     let mut snapshotted = vec![false; n];
+    let mut dirty_indices: Vec<usize> = Vec::new();
 
     while collapsed_count < n {
         // 1. Find uncollapsed cell with minimum entropy.
@@ -829,16 +831,23 @@ fn wfc_main_loop_backtracking(
                 cells[cell_idx].count = 1;
                 collapsed_count += 1;
 
-                // Reset snapshotted flags for this frame's propagation
-                for s in snapshotted.iter_mut() {
-                    *s = false;
+                // Reset snapshotted flags from previous frame
+                for &di in &dirty_indices {
+                    snapshotted[di] = false;
                 }
+                dirty_indices.clear();
                 // Mark the collapsed cell as snapshotted (we already have it)
                 snapshotted[cell_idx] = true;
+                dirty_indices.push(cell_idx);
 
                 // 6. Propagate with tracking
                 let (mut prop_snapshots, contradiction) =
                     propagate_tracked(cell_idx, adj, cells, &mut snapshotted);
+
+                // Track which indices propagate_tracked marked as snapshotted
+                for snap in &prop_snapshots {
+                    dirty_indices.push(snap.cell_idx);
+                }
 
                 // Prepend the collapsed cell's snapshot
                 prop_snapshots.insert(0, cell_snap);
