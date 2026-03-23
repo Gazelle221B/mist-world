@@ -13,9 +13,15 @@ import {
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
 import { initBridge, generateIsland } from "./world/wfc-bridge.ts";
-import { type IslandHandle, renderWorld } from "./world/island-renderer.ts";
+import {
+  type IslandHandle,
+  renderIsland as renderIslandMeshes,
+} from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
-import { terrainCountsByName } from "./world/terrain.ts";
+import {
+  TERRAIN_VOID_ID,
+  terrainCountsByName,
+} from "./world/terrain.ts";
 
 declare global {
   interface Window {
@@ -186,13 +192,16 @@ async function bootstrap() {
   // -----------------------------------------------------------------------
 
   const seed = seedFromHash();
-  let radius = radiusFromQuery() || 4;
+  let radius = radiusFromQuery();
   state.radius = radius;
   state.seedHex = `${(seed.hi >>> 0).toString(16).padStart(8, "0")}${(seed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
   let currentHandle: IslandHandle | null = null;
+  let renderEpoch = 0;
 
   async function renderIsland(seedHi: number, seedLo: number, r: number) {
+    const epoch = ++renderEpoch;
+
     if (currentHandle) {
       currentHandle.dispose();
       currentHandle = null;
@@ -200,21 +209,22 @@ async function bootstrap() {
 
     const result = generateIsland(seedHi, seedLo, r);
 
-    // Count terrains and voids
-    const counts = [0, 0, 0, 0, 0, 0];
-    let voids = 0;
-    for (const tile of result.tiles) {
-      if (tile.terrain === 255) { voids++; continue; }
-      counts[tile.terrain]++;
+    state.totalTileCount = result.tileCount;
+    state.voidCount = result.voidCount;
+    state.terrainCounts = result.terrainCounts;
+
+    const visibleTiles = result.tiles.filter(
+      (t) => t.terrain !== TERRAIN_VOID_ID,
+    );
+    const handle = await renderIslandMeshes(scene, visibleTiles);
+
+    // Discard if a newer render started while we awaited
+    if (epoch !== renderEpoch) {
+      handle.dispose();
+      return;
     }
-    state.totalTileCount = result.tiles.length - voids;
-    state.voidCount = voids;
-    state.terrainCounts = counts;
 
-    // Render tiles (exclude VOIDs)
-    const visibleTiles = result.tiles.filter((t) => t.terrain !== 255);
-    currentHandle = await renderWorld(scene, visibleTiles);
-
+    currentHandle = handle;
     updateStatusLine();
   }
 
@@ -255,7 +265,7 @@ async function bootstrap() {
 
   window.addEventListener("hashchange", async () => {
     const newSeed = seedFromHash();
-    const newRadius = radiusFromQuery() || 4;
+    const newRadius = radiusFromQuery();
     const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
     if (hex === state.seedHex && newRadius === state.radius) return;
