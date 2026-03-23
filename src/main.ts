@@ -12,25 +12,26 @@ import {
   WebGPUEngine,
 } from "@babylonjs/core";
 import "@babylonjs/loaders/glTF";
-import { initBridge, generateIsland } from "./world/wfc-bridge.ts";
+import { initBridge } from "./world/wfc-bridge.ts";
 import {
   type IslandHandle,
-  renderIsland as renderIslandMeshes,
+  type PlaceholderHandle,
+  renderWorld,
+  renderPlaceholders,
 } from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
-import {
-  TERRAIN_COUNT,
-  TERRAIN_VOID_ID,
-  terrainCountsByName,
-} from "./world/terrain.ts";
+import { terrainCountsByName } from "./world/terrain.ts";
+import { HexWorld } from "./world/hex-world.ts";
 
 declare global {
   interface Window {
     render_game_to_text?: () => string;
+    expand_region?: (macroQ: number, macroR: number) => void;
   }
 }
 
 type RendererKind = "webgpu" | "webgl2";
+type InteractionMode = "move" | "build";
 
 interface RuntimeState {
   renderer: RendererKind;
@@ -41,8 +42,13 @@ interface RuntimeState {
   seedHex: string;
   generator: "wasm" | "ts-fallback";
   radius: number;
+  mode: InteractionMode;
+  regionCount: number;
+  frontierCount: number;
+  failedRegionCount: number;
   totalTileCount: number;
   voidCount: number;
+  boundaryFixCount: number;
   terrainCounts: number[];
 }
 
@@ -59,7 +65,7 @@ app.innerHTML = `
     <header class="masthead">
       <p class="eyebrow">Mist World / Sprint 0</p>
       <h1>Babylon + WASM bootstrap</h1>
-      <p class="summary">Single-island visual slice.</p>
+      <p class="summary">Expandable hex world — click placeholders to grow.</p>
     </header>
     <div class="viewport">
       <canvas id="render-canvas" aria-label="Mist World viewport"></canvas>
@@ -70,6 +76,8 @@ app.innerHTML = `
         <span id="seed-pill" class="pill pill--dim">seed: --</span>
         <span id="gen-pill" class="pill pill--dim">gen: --</span>
         <span id="radius-pill" class="pill pill--dim">r: --</span>
+        <span id="mode-pill" class="pill pill--dim">mode: move</span>
+        <span id="region-pill" class="pill pill--dim">regions: 0</span>
       </div>
     </div>
     <p id="status-line" class="status-line">Preparing engine bootstrap...</p>
@@ -83,6 +91,8 @@ const meshPill = mustQuerySelector<HTMLSpanElement>("#mesh-pill");
 const seedPill = mustQuerySelector<HTMLSpanElement>("#seed-pill");
 const genPill = mustQuerySelector<HTMLSpanElement>("#gen-pill");
 const radiusPill = mustQuerySelector<HTMLSpanElement>("#radius-pill");
+const modePill = mustQuerySelector<HTMLSpanElement>("#mode-pill");
+const regionPill = mustQuerySelector<HTMLSpanElement>("#region-pill");
 const statusLine = mustQuerySelector<HTMLParagraphElement>("#status-line");
 
 const state: RuntimeState = {
@@ -93,10 +103,15 @@ const state: RuntimeState = {
   cameraRadius: 0,
   seedHex: "",
   generator: "ts-fallback",
-  radius: radiusFromQuery(),
+  radius: 2,
+  mode: "move",
+  regionCount: 0,
+  frontierCount: 0,
+  failedRegionCount: 0,
   totalTileCount: 0,
   voidCount: 0,
-  terrainCounts: Array(TERRAIN_COUNT).fill(0),
+  boundaryFixCount: 0,
+  terrainCounts: [0, 0, 0, 0, 0, 0],
 };
 
 async function createEngine(target: HTMLCanvasElement) {
@@ -128,10 +143,13 @@ function updateHud() {
   rendererPill.textContent = `renderer: ${state.renderer}`;
   fpsPill.textContent = `fps: ${state.fps.toFixed(1)}`;
   meshPill.textContent = `meshes: ${state.meshCount}`;
+  modePill.textContent = `mode: ${state.mode}`;
+  regionPill.textContent = `regions: ${state.regionCount}`;
 }
 
 function renderGameToText() {
   return JSON.stringify({
+    mode: state.mode,
     renderer: state.renderer,
     sceneReady: state.sceneReady,
     meshCount: state.meshCount,
@@ -140,8 +158,13 @@ function renderGameToText() {
     seedHex: state.seedHex,
     generator: state.generator,
     radius: state.radius,
-    tileCount: state.totalTileCount,
+    regionCount: state.regionCount,
+    populatedRegionCount: state.regionCount,
+    frontierCount: state.frontierCount,
+    failedRegionCount: state.failedRegionCount,
+    globalTileCount: state.totalTileCount,
     voidCount: state.voidCount,
+    boundaryFixCount: state.boundaryFixCount,
     terrainCounts: state.terrainCounts,
     terrainCountsByName: terrainCountsByName(state.terrainCounts),
   });
@@ -189,39 +212,73 @@ async function bootstrap() {
   state.generator = genKind;
 
   // -----------------------------------------------------------------------
-  // Single-island generation
+  // World state
   // -----------------------------------------------------------------------
 
   const seed = seedFromHash();
-  state.radius = radiusFromQuery();
+  const radius = radiusFromQuery();
+  state.radius = radius;
   state.seedHex = `${(seed.hi >>> 0).toString(16).padStart(8, "0")}${(seed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
-  let currentHandle: IslandHandle | null = null;
-  let renderEpoch = 0;
+  const world = new HexWorld(radius, seed.hi, seed.lo);
+  world.init();
 
-  async function renderIsland(seedHi: number, seedLo: number, r: number) {
-    const epoch = ++renderEpoch;
-    const previousHandle = currentHandle;
+  // Track world rendering and placeholders
+  const worldHandles: IslandHandle[] = [];
+  let placeholderHandle: PlaceholderHandle | null = null;
 
-    const result = generateIsland(seedHi, seedLo, r);
+  /** Aggregate terrain stats from globalTiles. */
+  function updateWorldStats() {
+    const tiles = world.allTiles();
+    const counts = [0, 0, 0, 0, 0, 0];
 
-    state.totalTileCount = result.tileCount;
-    state.voidCount = result.voidCount;
-    state.terrainCounts = result.terrainCounts;
-
-    const visibleTiles = result.tiles.filter(
-      (t) => t.terrain !== TERRAIN_VOID_ID,
-    );
-    const handle = await renderIslandMeshes(scene, visibleTiles);
-
-    // Discard if a newer render started while we awaited
-    if (epoch !== renderEpoch) {
-      handle.dispose();
-      return;
+    for (const tile of tiles) {
+      counts[tile.terrain]++;
     }
 
-    currentHandle = handle;
-    previousHandle?.dispose();
+    state.regionCount = world.populatedCount();
+    state.frontierCount = world.placeholders().length;
+    state.failedRegionCount = world.failedRegions().length;
+    state.totalTileCount = world.globalTileCount();
+    state.voidCount = world.totalVoidCount();
+    state.boundaryFixCount = world.totalBoundaryFixes();
+    state.terrainCounts = counts;
+  }
+
+  /** Dispose all world tile handles. */
+  function disposeWorldHandles() {
+    for (const h of worldHandles) h.dispose();
+    worldHandles.length = 0;
+  }
+
+  /** Rebuild placeholder visuals. */
+  function rebuildPlaceholders() {
+    if (placeholderHandle) {
+      placeholderHandle.dispose();
+      placeholderHandle = null;
+    }
+
+    // Render both placeholders and failed regions (both are clickable)
+    const phs = [...world.placeholders(), ...world.failedRegions()];
+    if (phs.length > 0) {
+      placeholderHandle = renderPlaceholders(scene, phs, world.spacing);
+    }
+  }
+
+  /** Full rebuild: dispose all, re-render everything without animation. */
+  async function fullRebuild() {
+    disposeWorldHandles();
+    if (placeholderHandle) {
+      placeholderHandle.dispose();
+      placeholderHandle = null;
+    }
+
+    const tiles = world.allTiles();
+    if (tiles.length > 0) {
+      worldHandles.push(await renderWorld(scene, tiles));
+    }
+    rebuildPlaceholders();
+    updateWorldStats();
     updateStatusLine();
   }
 
@@ -230,20 +287,92 @@ async function bootstrap() {
     genPill.textContent = `gen: ${state.generator}`;
     radiusPill.textContent = `r: ${state.radius}`;
 
-    if (state.voidCount > 0) {
+    if (state.failedRegionCount > 0 && state.regionCount === 0) {
+      statusLine.textContent =
+        `${state.failedRegionCount} region(s) failed to solve. Click to retry. seed ${state.seedHex}`;
+    } else if (state.voidCount > 0) {
       statusLine.textContent =
         `Warning: ${state.voidCount} void tile(s) — WFC contradiction. seed ${state.seedHex}`;
     } else {
+      const failedSuffix = state.failedRegionCount > 0
+        ? ` (${state.failedRegionCount} failed)`
+        : "";
       statusLine.textContent =
-        `${state.totalTileCount} tiles. seed ${state.seedHex}`;
+        `${state.regionCount} region(s), ${state.totalTileCount} tiles${failedSuffix}. ` +
+        `[B] toggle build mode. Click placeholder to expand.`;
     }
   }
 
   // Initial render
-  await renderIsland(seed.hi, seed.lo, state.radius);
+  await fullRebuild();
 
   // -----------------------------------------------------------------------
-  // Render loop
+  // Interaction: Build mode + placeholder clicking
+  // -----------------------------------------------------------------------
+
+  let expanding = false;
+
+  async function expandAt(macroQ: number, macroR: number) {
+    if (expanding) return; // prevent double-click during animation
+    expanding = true;
+    statusLine.textContent = `Building region (${macroQ}, ${macroR})...`;
+
+    const result = world.expand(macroQ, macroR);
+
+    if (result.kind === "invalid") {
+      statusLine.textContent = `Cannot expand at (${macroQ}, ${macroR}).`;
+      expanding = false;
+      return;
+    }
+
+    if (result.kind === "failed") {
+      rebuildPlaceholders();
+      updateWorldStats();
+      statusLine.textContent =
+        `Region solve failed at (${macroQ}, ${macroR}) ` +
+        `after ${result.attemptsUsed} attempt(s). Click to retry.`;
+      expanding = false;
+      return;
+    }
+
+    // kind === "expanded"
+    if (result.newTiles.length > 0) {
+      const handle = await renderWorld(scene, result.newTiles, true);
+      worldHandles.push(handle);
+    }
+
+    rebuildPlaceholders();
+    updateWorldStats();
+    updateStatusLine();
+    expanding = false;
+  }
+
+  scene.onPointerObservable.add((pointerInfo) => {
+    if (pointerInfo.type !== 1) return; // POINTERDOWN = 1
+    if (state.mode !== "build") return;
+    if (expanding) return; // guard against clicks during expand
+
+    const pickResult = scene.pick(
+      scene.pointerX,
+      scene.pointerY,
+      (mesh) => mesh.metadata?.macroQ !== undefined,
+    );
+    if (!pickResult?.hit || !pickResult.pickedMesh) return;
+
+    const meta = pickResult.pickedMesh.metadata as {
+      macroQ: number;
+      macroR: number;
+    };
+    expandAt(meta.macroQ, meta.macroR);
+  });
+
+  window.expand_region = (macroQ: number, macroR: number) => {
+    if (expanding) return;
+    expandAt(macroQ, macroR);
+  };
+
+  // -----------------------------------------------------------------------
+  // Render loop + keyboard
   // -----------------------------------------------------------------------
 
   const step = () => {
@@ -260,26 +389,30 @@ async function bootstrap() {
 
   window.render_game_to_text = renderGameToText;
 
-  window.addEventListener("hashchange", async () => {
-    try {
-      const newSeed = seedFromHash();
-      const newRadius = radiusFromQuery();
-      const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
+  window.addEventListener("hashchange", () => {
+    const newSeed = seedFromHash();
+    const newRadius = radiusFromQuery();
+    const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
-      if (hex === state.seedHex && newRadius === state.radius) return;
+    if (hex === state.seedHex && newRadius === state.radius) return;
 
-      await renderIsland(newSeed.hi, newSeed.lo, newRadius);
-      state.seedHex = hex;
-      state.radius = newRadius;
-      updateStatusLine();
-    } catch (error) {
-      console.error(error);
-      statusLine.textContent = "Island redraw failed. Check the console for details.";
-    }
+    state.seedHex = hex;
+    state.radius = newRadius;
+    world.reset(newSeed.hi, newSeed.lo);
+    fullRebuild();
   });
 
   window.addEventListener("keydown", async (event) => {
-    if (event.key.toLowerCase() === "f") {
+    const key = event.key.toLowerCase();
+
+    if (key === "b") {
+      state.mode = state.mode === "move" ? "build" : "move";
+      modePill.textContent = `mode: ${state.mode}`;
+      // Visual feedback: show/hide placeholder edges
+      canvas.style.cursor = state.mode === "build" ? "crosshair" : "default";
+    }
+
+    if (key === "f") {
       if (document.fullscreenElement) {
         await document.exitFullscreen();
       } else {

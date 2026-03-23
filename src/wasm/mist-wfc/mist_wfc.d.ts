@@ -8,16 +8,22 @@ export function engine_version(): string;
  *
  * `radius` controls how many hex rings to generate:
  *   0 → 1 tile, 1 → 7 tiles, 2 → 19 tiles, 3 → 37 tiles, etc.
+ *
+ * `max_attempts` controls how many deterministic retry attempts are made
+ * before giving up. Each attempt varies branch choices (tie-break and
+ * weighted pick) without changing the seed or RNG stream.
  */
-export function generate(seed_hi: number, seed_lo: number, radius: number): string;
+export function generate(seed_hi: number, seed_lo: number, radius: number, max_attempts: number): string;
 
 /**
  * Generate a hex island with boundary constraints from neighbouring regions.
  *
  * `constraints_json` is a JSON array of `{ q, r, dir, edge_type }` objects
  * specifying edge constraints from already-populated neighbours.
+ *
+ * `max_attempts` controls deterministic retry attempts (see `generate`).
  */
-export function generate_constrained(seed_hi: number, seed_lo: number, radius: number, constraints_json: string): string;
+export function generate_constrained(seed_hi: number, seed_lo: number, radius: number, constraints_json: string, max_attempts: number): string;
 
 /**
  * Legacy preview — kept for backwards compatibility.
@@ -29,8 +35,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly engine_version: () => [number, number];
-    readonly generate: (a: number, b: number, c: number) => [number, number];
-    readonly generate_constrained: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly generate: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly generate_constrained: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly generate_preview: (a: number, b: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

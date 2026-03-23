@@ -24,6 +24,10 @@ export interface GenerateResult {
   voidCount: number;
   terrainCounts: number[];
   boundaryFixCount: number;
+  /** Number of solve attempts used (1-based). */
+  attemptsUsed: number;
+  /** false when all attempts failed to eliminate VOID tiles. */
+  solved: boolean;
   tiles: TileData[];
 }
 
@@ -47,12 +51,18 @@ export type PreviewResult = GenerateResult;
  */
 export interface GeneratorProvider {
   readonly kind: GeneratorProviderKind;
-  generate(seedHi: number, seedLo: number, radius: number): GenerateResult;
+  generate(
+    seedHi: number,
+    seedLo: number,
+    radius: number,
+    maxAttempts?: number,
+  ): GenerateResult;
   generateConstrained(
     seedHi: number,
     seedLo: number,
     radius: number,
     constraints: BoundaryConstraint[],
+    maxAttempts?: number,
   ): GenerateResult;
 }
 
@@ -158,6 +168,8 @@ function tsFallbackGenerate(
     voidCount,
     terrainCounts,
     boundaryFixCount: 0,
+    attemptsUsed: 1,
+    solved: true,
     tiles,
   };
 }
@@ -189,6 +201,8 @@ interface WasmGenerateJson {
   void_count: number;
   terrain_counts: number[];
   boundary_fix_count: number;
+  attempts_used: number;
+  solved: boolean;
   tiles: Array<{
     q: number;
     r: number;
@@ -219,35 +233,65 @@ function parseWasmJson(raw: string): GenerateResult {
     voidCount: json.void_count,
     terrainCounts: json.terrain_counts,
     boundaryFixCount: json.boundary_fix_count,
+    attemptsUsed: json.attempts_used,
+    solved: json.solved,
     tiles,
   };
 }
 
 interface WasmModule {
-  generate: (seedHi: number, seedLo: number, radius: number) => string;
+  generate: (
+    seedHi: number,
+    seedLo: number,
+    radius: number,
+    maxAttempts: number,
+  ) => string;
   generate_constrained: (
     seedHi: number,
     seedLo: number,
     radius: number,
     constraintsJson: string,
+    maxAttempts: number,
   ) => string;
 }
+
+/** Default number of deterministic retry attempts. */
+const DEFAULT_MAX_ATTEMPTS = 5;
 
 function createWasmProvider(wasmModule: WasmModule): GeneratorProvider {
   return {
     kind: "wasm",
-    generate(seedHi: number, seedLo: number, radius: number): GenerateResult {
-      return parseWasmJson(wasmModule.generate(seedHi, seedLo, radius));
+    generate(
+      seedHi: number,
+      seedLo: number,
+      radius: number,
+      maxAttempts?: number,
+    ): GenerateResult {
+      return parseWasmJson(
+        wasmModule.generate(
+          seedHi,
+          seedLo,
+          radius,
+          maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        ),
+      );
     },
     generateConstrained(
       seedHi: number,
       seedLo: number,
       radius: number,
       constraints: BoundaryConstraint[],
+      maxAttempts?: number,
     ): GenerateResult {
       const json = JSON.stringify(constraints);
       return parseWasmJson(
-        wasmModule.generate_constrained(seedHi, seedLo, radius, json),
+        wasmModule.generate_constrained(
+          seedHi,
+          seedLo,
+          radius,
+          json,
+          maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        ),
       );
     },
   };
@@ -294,9 +338,10 @@ export function generateIsland(
   seedHi: number,
   seedLo: number,
   radius: number = DEFAULT_RADIUS,
+  maxAttempts?: number,
 ): GenerateResult {
   const provider = cachedProvider ?? tsFallbackProvider;
-  return provider.generate(seedHi, seedLo, radius);
+  return provider.generate(seedHi, seedLo, radius, maxAttempts);
 }
 
 /**
@@ -307,9 +352,16 @@ export function generateIslandConstrained(
   seedLo: number,
   radius: number,
   constraints: BoundaryConstraint[],
+  maxAttempts?: number,
 ): GenerateResult {
   const provider = cachedProvider ?? tsFallbackProvider;
-  return provider.generateConstrained(seedHi, seedLo, radius, constraints);
+  return provider.generateConstrained(
+    seedHi,
+    seedLo,
+    radius,
+    constraints,
+    maxAttempts,
+  );
 }
 
 /**

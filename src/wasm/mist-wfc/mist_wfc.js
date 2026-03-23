@@ -21,16 +21,21 @@ export function engine_version() {
  *
  * `radius` controls how many hex rings to generate:
  *   0 → 1 tile, 1 → 7 tiles, 2 → 19 tiles, 3 → 37 tiles, etc.
+ *
+ * `max_attempts` controls how many deterministic retry attempts are made
+ * before giving up. Each attempt varies branch choices (tie-break and
+ * weighted pick) without changing the seed or RNG stream.
  * @param {number} seed_hi
  * @param {number} seed_lo
  * @param {number} radius
+ * @param {number} max_attempts
  * @returns {string}
  */
-export function generate(seed_hi, seed_lo, radius) {
+export function generate(seed_hi, seed_lo, radius, max_attempts) {
     let deferred1_0;
     let deferred1_1;
     try {
-        const ret = wasm.generate(seed_hi, seed_lo, radius);
+        const ret = wasm.generate(seed_hi, seed_lo, radius, max_attempts);
         deferred1_0 = ret[0];
         deferred1_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
@@ -44,19 +49,22 @@ export function generate(seed_hi, seed_lo, radius) {
  *
  * `constraints_json` is a JSON array of `{ q, r, dir, edge_type }` objects
  * specifying edge constraints from already-populated neighbours.
+ *
+ * `max_attempts` controls deterministic retry attempts (see `generate`).
  * @param {number} seed_hi
  * @param {number} seed_lo
  * @param {number} radius
  * @param {string} constraints_json
+ * @param {number} max_attempts
  * @returns {string}
  */
-export function generate_constrained(seed_hi, seed_lo, radius, constraints_json) {
+export function generate_constrained(seed_hi, seed_lo, radius, constraints_json, max_attempts) {
     let deferred2_0;
     let deferred2_1;
     try {
         const ptr0 = passStringToWasm0(constraints_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.generate_constrained(seed_hi, seed_lo, radius, ptr0, len0);
+        const ret = wasm.generate_constrained(seed_hi, seed_lo, radius, ptr0, len0, max_attempts);
         deferred2_0 = ret[0];
         deferred2_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
