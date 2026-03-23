@@ -19,6 +19,7 @@ import {
 } from "./world/island-renderer.ts";
 import { radiusFromQuery, seedFromHash } from "./world/seed.ts";
 import {
+  TERRAIN_COUNT,
   TERRAIN_VOID_ID,
   terrainCountsByName,
 } from "./world/terrain.ts";
@@ -95,7 +96,7 @@ const state: RuntimeState = {
   radius: radiusFromQuery(),
   totalTileCount: 0,
   voidCount: 0,
-  terrainCounts: [0, 0, 0, 0, 0, 0],
+  terrainCounts: Array(TERRAIN_COUNT).fill(0),
 };
 
 async function createEngine(target: HTMLCanvasElement) {
@@ -192,8 +193,7 @@ async function bootstrap() {
   // -----------------------------------------------------------------------
 
   const seed = seedFromHash();
-  let radius = radiusFromQuery();
-  state.radius = radius;
+  state.radius = radiusFromQuery();
   state.seedHex = `${(seed.hi >>> 0).toString(16).padStart(8, "0")}${(seed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
   let currentHandle: IslandHandle | null = null;
@@ -240,7 +240,7 @@ async function bootstrap() {
   }
 
   // Initial render
-  await renderIsland(seed.hi, seed.lo, radius);
+  await renderIsland(seed.hi, seed.lo, state.radius);
 
   // -----------------------------------------------------------------------
   // Render loop
@@ -261,16 +261,20 @@ async function bootstrap() {
   window.render_game_to_text = renderGameToText;
 
   window.addEventListener("hashchange", async () => {
-    const newSeed = seedFromHash();
-    const newRadius = radiusFromQuery();
-    const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
+    try {
+      const newSeed = seedFromHash();
+      const newRadius = radiusFromQuery();
+      const hex = `${(newSeed.hi >>> 0).toString(16).padStart(8, "0")}${(newSeed.lo >>> 0).toString(16).padStart(8, "0")}`;
 
-    if (hex === state.seedHex && newRadius === state.radius) return;
+      if (hex === state.seedHex && newRadius === state.radius) return;
 
-    state.seedHex = hex;
-    state.radius = newRadius;
-    radius = newRadius;
-    await renderIsland(newSeed.hi, newSeed.lo, newRadius);
+      state.seedHex = hex;
+      state.radius = newRadius;
+      await renderIsland(newSeed.hi, newSeed.lo, newRadius);
+    } catch (error) {
+      console.error(error);
+      statusLine.textContent = "Island redraw failed. Check the console for details.";
+    }
   });
 
   window.addEventListener("keydown", async (event) => {
