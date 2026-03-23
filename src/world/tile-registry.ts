@@ -26,6 +26,8 @@ export interface PrimitiveMeshDescriptor {
   readonly diameter: number;
   readonly height: number;
   readonly rotationY: number;
+  /** Scale applied per thin instance (XZ). Defaults to 1. */
+  readonly tileScale?: number;
 }
 
 export interface GltfMeshDescriptor {
@@ -35,6 +37,8 @@ export interface GltfMeshDescriptor {
   readonly meshName: string;
   readonly scale: number;
   readonly rotationY: number;
+  /** Scale applied per thin instance (XZ). Defaults to 1. */
+  readonly tileScale?: number;
 }
 
 export type MeshDescriptor = PrimitiveMeshDescriptor | GltfMeshDescriptor;

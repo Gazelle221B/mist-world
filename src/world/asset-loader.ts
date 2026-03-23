@@ -40,7 +40,11 @@ async function loadGltf(
   material: StandardMaterial,
 ): Promise<Mesh> {
   const cached = gltfCache.get(md.assetKey);
-  if (cached && !cached.isDisposed()) return cached.clone(`src-${md.key}`)!;
+  if (cached && !cached.isDisposed()) {
+    const mesh = cached.clone(`src-${md.key}`)!;
+    mesh.material = material;
+    return mesh;
+  }
 
   const result = await SceneLoader.ImportMeshAsync(
     "",

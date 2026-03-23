@@ -61,6 +61,7 @@ interface AnimEntry {
   delayMs: number;
   revealed: boolean;
   // Per-tile render data for partial matrix reconstruction
+  tileScale: number;
   height: number;
   yOffset: number;
   rotY: number;
@@ -125,14 +126,15 @@ export async function renderIsland(
       const { tile, desc, worldQ, worldR } = group.entries[i];
       const { x, z } = axialToWorld(worldQ, worldR);
       const rotY = tile.rotation * (Math.PI / 3);
+      const ts = desc.mesh.tileScale ?? 1;
 
-      const targetMatrix = Matrix.Scaling(1, desc.height, 1)
+      const targetMatrix = Matrix.Scaling(ts, desc.height, ts)
         .multiply(Matrix.RotationY(rotY))
         .multiply(Matrix.Translation(x, desc.yOffset, z));
 
       if (animate) {
         // Start flat (y-scale = 0) at the same position
-        const flatMatrix = Matrix.Scaling(1, 0, 1)
+        const flatMatrix = Matrix.Scaling(ts, 0, ts)
           .multiply(Matrix.RotationY(rotY))
           .multiply(Matrix.Translation(x, desc.yOffset, z));
         const instanceIdx = source.thinInstanceAdd(flatMatrix);
@@ -147,6 +149,7 @@ export async function renderIsland(
           targetMatrix,
           delayMs,
           revealed: false,
+          tileScale: ts,
           height: desc.height,
           yOffset: desc.yOffset,
           rotY,
@@ -199,7 +202,7 @@ export async function renderIsland(
         } else {
           // Smooth-step easing for gentle rise
           const ease = t * t * (3 - 2 * t);
-          const partialMatrix = Matrix.Scaling(1, entry.height * ease, 1)
+          const partialMatrix = Matrix.Scaling(entry.tileScale, entry.height * ease, entry.tileScale)
             .multiply(Matrix.RotationY(entry.rotY))
             .multiply(Matrix.Translation(entry.worldX, entry.yOffset, entry.worldZ));
           entry.mesh.thinInstanceSetMatrixAt(
@@ -248,11 +251,12 @@ export async function renderIsland(
  * Render the entire world as a single unified terrain from world-coord tiles.
  *
  * Unlike renderIsland(), tiles already have world-space q/r so no macro
- * offset is needed. No animation — full redraw is the current strategy.
+ * offset is needed. When `animate=true`, tiles rise in collapseOrder stagger.
  */
 export async function renderWorld(
   scene: Scene,
   tiles: WorldTile[],
+  animate: boolean = false,
 ): Promise<IslandHandle> {
   const material = new StandardMaterial("hex-terrain", scene);
   material.diffuseColor = new Color3(1, 1, 1);
@@ -274,7 +278,16 @@ export async function renderWorld(
     group.entries.push({ tile, desc });
   }
 
+  // Compute max collapse order for normalisation
+  let maxOrder = 0;
+  if (animate) {
+    for (const tile of tiles) {
+      if (tile.collapseOrder > maxOrder) maxOrder = tile.collapseOrder;
+    }
+  }
+
   const meshes: Mesh[] = [];
+  const animEntries: AnimEntry[] = [];
 
   for (const [, group] of groups) {
     const source = await loadMeshDescriptor(scene, material, group.md);
@@ -285,12 +298,38 @@ export async function renderWorld(
       const { tile, desc } = group.entries[i];
       const { x, z } = axialToWorld(tile.q, tile.r);
       const rotY = tile.rotation * (Math.PI / 3);
+      const ts = desc.mesh.tileScale ?? 1;
 
-      const matrix = Matrix.Scaling(1, desc.height, 1)
+      const targetMatrix = Matrix.Scaling(ts, desc.height, ts)
         .multiply(Matrix.RotationY(rotY))
         .multiply(Matrix.Translation(x, desc.yOffset, z));
 
-      source.thinInstanceAdd(matrix);
+      if (animate) {
+        const flatMatrix = Matrix.Scaling(ts, 0, ts)
+          .multiply(Matrix.RotationY(rotY))
+          .multiply(Matrix.Translation(x, desc.yOffset, z));
+        const instanceIdx = source.thinInstanceAdd(flatMatrix);
+
+        const delayMs = maxOrder > 0
+          ? (tile.collapseOrder / maxOrder) * ANIM_DURATION_MS
+          : 0;
+
+        animEntries.push({
+          mesh: source,
+          instanceIdx,
+          targetMatrix,
+          delayMs,
+          revealed: false,
+          tileScale: ts,
+          height: desc.height,
+          yOffset: desc.yOffset,
+          rotY,
+          worldX: x,
+          worldZ: z,
+        });
+      } else {
+        source.thinInstanceAdd(targetMatrix);
+      }
 
       colorData[i * 4 + 0] = desc.color.r;
       colorData[i * 4 + 1] = desc.color.g;
@@ -302,11 +341,73 @@ export async function renderWorld(
     meshes.push(source);
   }
 
+  // Animation state
+  let isAnimating = animate && animEntries.length > 0;
+  let observer: Observer<Scene> | null = null;
+
+  if (isAnimating) {
+    const startTime = performance.now();
+    let revealedCount = 0;
+    const total = animEntries.length;
+
+    observer = scene.onBeforeRenderObservable.add(() => {
+      const elapsed = performance.now() - startTime;
+      let anyUpdated = false;
+
+      for (const entry of animEntries) {
+        if (entry.revealed) continue;
+        if (elapsed < entry.delayMs) continue;
+
+        const tileElapsed = elapsed - entry.delayMs;
+        const t = Math.min(tileElapsed / TILE_RISE_MS, 1);
+
+        if (t >= 1) {
+          entry.mesh.thinInstanceSetMatrixAt(
+            entry.instanceIdx, entry.targetMatrix, false,
+          );
+          entry.revealed = true;
+          revealedCount++;
+          anyUpdated = true;
+        } else {
+          const ease = t * t * (3 - 2 * t);
+          const partialMatrix = Matrix.Scaling(entry.tileScale, entry.height * ease, entry.tileScale)
+            .multiply(Matrix.RotationY(entry.rotY))
+            .multiply(Matrix.Translation(entry.worldX, entry.yOffset, entry.worldZ));
+          entry.mesh.thinInstanceSetMatrixAt(
+            entry.instanceIdx, partialMatrix, false,
+          );
+          anyUpdated = true;
+        }
+      }
+
+      if (anyUpdated) {
+        for (const m of meshes) {
+          if (m.thinInstanceCount > 0) {
+            m.thinInstanceBufferUpdated("matrix");
+          }
+        }
+      }
+
+      if (revealedCount >= total) {
+        isAnimating = false;
+        if (observer) {
+          scene.onBeforeRenderObservable.remove(observer);
+          observer = null;
+        }
+      }
+    });
+  }
+
   return {
     get animating() {
-      return false;
+      return isAnimating;
     },
     dispose() {
+      if (observer) {
+        scene.onBeforeRenderObservable.remove(observer);
+        observer = null;
+      }
+      isAnimating = false;
       for (const m of meshes) m.dispose();
       material.dispose();
     },

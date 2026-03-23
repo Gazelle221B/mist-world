@@ -220,7 +220,7 @@ async function bootstrap() {
   world.init();
 
   // Track world rendering and placeholders
-  let worldHandle: IslandHandle | null = null;
+  const worldHandles: IslandHandle[] = [];
   let placeholderHandle: PlaceholderHandle | null = null;
 
   /** Aggregate terrain stats from globalTiles. */
@@ -240,16 +240,10 @@ async function bootstrap() {
     state.terrainCounts = counts;
   }
 
-  /** Re-render the entire world from globalTiles. */
-  async function renderWorldTiles() {
-    if (worldHandle) {
-      worldHandle.dispose();
-      worldHandle = null;
-    }
-    const tiles = world.allTiles();
-    if (tiles.length > 0) {
-      worldHandle = await renderWorld(scene, tiles);
-    }
+  /** Dispose all world tile handles. */
+  function disposeWorldHandles() {
+    for (const h of worldHandles) h.dispose();
+    worldHandles.length = 0;
   }
 
   /** Rebuild placeholder visuals. */
@@ -265,18 +259,18 @@ async function bootstrap() {
     }
   }
 
-  /** Full rebuild: dispose all, regenerate from world state. */
+  /** Full rebuild: dispose all, re-render everything without animation. */
   async function fullRebuild() {
-    if (worldHandle) {
-      worldHandle.dispose();
-      worldHandle = null;
-    }
+    disposeWorldHandles();
     if (placeholderHandle) {
       placeholderHandle.dispose();
       placeholderHandle = null;
     }
 
-    await renderWorldTiles();
+    const tiles = world.allTiles();
+    if (tiles.length > 0) {
+      worldHandles.push(await renderWorld(scene, tiles));
+    }
     rebuildPlaceholders();
     updateWorldStats();
     updateStatusLine();
@@ -311,14 +305,17 @@ async function bootstrap() {
     expanding = true;
     statusLine.textContent = `Building region (${macroQ}, ${macroR})...`;
 
-    const ok = world.expand(macroQ, macroR);
-    if (!ok) {
+    const newTiles = world.expand(macroQ, macroR);
+    if (newTiles.length === 0) {
       statusLine.textContent = `Cannot expand at (${macroQ}, ${macroR}).`;
       expanding = false;
       return;
     }
 
-    await renderWorldTiles();
+    // Render only the new tiles with rise animation
+    const handle = await renderWorld(scene, newTiles, true);
+    worldHandles.push(handle);
+
     rebuildPlaceholders();
     updateWorldStats();
     updateStatusLine();

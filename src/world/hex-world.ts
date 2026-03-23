@@ -46,27 +46,58 @@ function regionKey(q: number, r: number): string {
   return `${q},${r}`;
 }
 
+/** Hex (axial) distance between two cells. */
+function hexDistance(q1: number, r1: number, q2: number, r2: number): number {
+  const dq = q1 - q2;
+  const dr = r1 - r2;
+  return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
+}
+
+function buildRingOffsetMap(radius: number): Map<string, number> {
+  const ring = new Map<string, number>();
+  if (radius <= 0) return ring;
+
+  let q = -radius;
+  let r = 0;
+
+  for (const [dq, dr] of HEX_DIRS) {
+    for (let offset = 0; offset < radius; offset++) {
+      ring.set(`${q},${r}`, offset);
+      q += dq;
+      r += dr;
+    }
+  }
+
+  return ring;
+}
+
 export class HexWorld {
   private readonly regions = new Map<string, RegionState>();
   private readonly _globalTiles = new Map<string, WorldTile>();
   private seedHi: number;
   private seedLo: number;
   readonly radius: number;
+  /** WFC solve radius — one ring larger to cover 3-way junction gaps. */
+  readonly solveRadius: number;
   readonly spacing: number;
 
-  /** Cached set of local coords for a region (radius-dependent). */
-  private readonly localCoordSet: Set<string>;
+  /** Cached set of local coords for the solve radius. */
+  private readonly solveCoordSet: Set<string>;
+  /** Offset index for each cell on the outer solve ring. */
+  private readonly solveRingOffsets: Map<string, number>;
 
   constructor(radius: number, seedHi: number, seedLo: number) {
     this.radius = radius;
+    this.solveRadius = radius + 1;
     this.spacing = 2 * radius + 1;
     this.seedHi = seedHi;
     this.seedLo = seedLo;
 
-    // Pre-compute the set of local coordinates for quick membership checks
-    this.localCoordSet = new Set(
-      hexSpiral(radius).map(([q, r]) => `${q},${r}`),
+    // Pre-compute the set of local coordinates for the solve area
+    this.solveCoordSet = new Set(
+      hexSpiral(this.solveRadius).map(([q, r]) => `${q},${r}`),
     );
+    this.solveRingOffsets = buildRingOffsetMap(this.solveRadius);
   }
 
   /** Initialize: populate center, add ring-1 placeholders. */
@@ -79,19 +110,30 @@ export class HexWorld {
     }
   }
 
-  /** Expand a placeholder into a populated region. Returns false if invalid. */
-  expand(macroQ: number, macroR: number): boolean {
+  /**
+   * Expand a placeholder into a populated region.
+   * Returns the newly added WorldTiles (empty array if invalid).
+   */
+  expand(macroQ: number, macroR: number): WorldTile[] {
     const key = regionKey(macroQ, macroR);
     const region = this.regions.get(key);
-    if (!region || region.status !== "placeholder") return false;
+    if (!region || region.status !== "placeholder") return [];
 
+    // Snapshot existing keys so we only return truly new tiles
+    const existingKeys = new Set(this._globalTiles.keys());
     this.populateRegion(region);
+
+    // Collect only the tiles that were newly added
+    const newTiles: WorldTile[] = [];
+    for (const [key, wt] of this._globalTiles) {
+      if (!existingKeys.has(key)) newTiles.push(wt);
+    }
 
     // Add placeholders around the newly populated region
     for (const [dq, dr] of MACRO_DIRS) {
       this.ensurePlaceholder(macroQ + dq, macroR + dr);
     }
-    return true;
+    return newTiles;
   }
 
   /** All populated regions. */
@@ -212,7 +254,7 @@ export class HexWorld {
           const localQ = adjWorldQ - newOriginQ;
           const localR = adjWorldR - newOriginR;
 
-          if (this.localCoordSet.has(`${localQ},${localR}`)) {
+          if (this.solveCoordSet.has(`${localQ},${localR}`)) {
             const existingEdge = edgeAt(
               tile.prototypeId,
               d,
@@ -267,18 +309,23 @@ export class HexWorld {
     );
 
     const result = constraints.length > 0
-      ? generateIslandConstrained(hi, lo, this.radius, constraints)
-      : generateIsland(hi, lo, this.radius);
+      ? generateIslandConstrained(hi, lo, this.solveRadius, constraints)
+      : generateIsland(hi, lo, this.solveRadius);
 
     region.status = "populated";
     region.tiles = result.tiles;
     region.boundaryFixCount = result.boundaryFixCount;
 
-    // Merge into global tile map (world coordinates)
+    // Merge only owned cells into the global tile map
     for (const tile of result.tiles) {
       if (tile.terrain === 255) continue; // skip VOID
       const wq = region.macroQ * this.spacing + tile.q;
       const wr = region.macroR * this.spacing + tile.r;
+
+      if (!this.isOwnedLocalCell(tile.q, tile.r)) continue;
+      // Skip if another region already claimed this cell
+      if (this._globalTiles.has(`${wq},${wr}`)) continue;
+
       this._globalTiles.set(`${wq},${wr}`, {
         ...tile,
         q: wq,
@@ -287,6 +334,37 @@ export class HexWorld {
         worldR: wr,
       });
     }
+  }
+
+  /**
+   * Determine whether a local cell belongs to this region's visible footprint.
+   *
+   * The region always owns its visible-radius core. On the outer solve ring it
+   * owns cells that are strictly closer to this region than to any neighbour,
+   * plus one deterministic tie cell per side. This keeps the footprint
+   * symmetric while filling the 3-way junction pockets between regions.
+   */
+  private isOwnedLocalCell(localQ: number, localR: number): boolean {
+    const d0 = hexDistance(localQ, localR, 0, 0);
+    if (d0 <= this.radius) return true;
+    if (d0 > this.solveRadius) return false;
+
+    let minNeighbor = Infinity;
+    for (const [dq, dr] of MACRO_DIRS) {
+      const d = hexDistance(
+        localQ,
+        localR,
+        dq * this.spacing,
+        dr * this.spacing,
+      );
+      if (d < minNeighbor) minNeighbor = d;
+    }
+
+    if (d0 < minNeighbor) return true;
+    if (d0 > minNeighbor) return false;
+
+    const offset = this.solveRingOffsets.get(`${localQ},${localR}`);
+    return offset === this.solveRadius - 1;
   }
 
   private ensurePlaceholder(macroQ: number, macroR: number): void {
