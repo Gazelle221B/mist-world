@@ -92,7 +92,7 @@ const state: RuntimeState = {
   cameraRadius: 0,
   seedHex: "",
   generator: "ts-fallback",
-  radius: 4,
+  radius: radiusFromQuery(),
   totalTileCount: 0,
   voidCount: 0,
   terrainCounts: [0, 0, 0, 0, 0, 0],
@@ -201,11 +201,7 @@ async function bootstrap() {
 
   async function renderIsland(seedHi: number, seedLo: number, r: number) {
     const epoch = ++renderEpoch;
-
-    if (currentHandle) {
-      currentHandle.dispose();
-      currentHandle = null;
-    }
+    const previousHandle = currentHandle;
 
     const result = generateIsland(seedHi, seedLo, r);
 
@@ -225,6 +221,7 @@ async function bootstrap() {
     }
 
     currentHandle = handle;
+    previousHandle?.dispose();
     updateStatusLine();
   }
 
